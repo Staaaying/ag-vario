@@ -60,31 +60,37 @@ Shown in the bottom toolbar of every visible chat pane (supports 2 / 3 / 4 split
 
 ## Quick Start
 
-**Requirements**: macOS · Antigravity 2.0 Desktop (tested on `v2.34.0`) · Node.js `>= 22.5.0`
+**Requirements**: macOS · Antigravity 2.0 Desktop (tested on `v2.34.0`) · Node.js `>= 22.5.0` (zero dependencies, no `npm install` needed)
 
 ### Install
 
 ```bash
-# Back up original app.asar and install ag-vario
+git clone https://github.com/Staaaying/ag-vario.git
+cd ag-vario
 npm run hud:install
 ```
 
 After installing, **completely quit Antigravity (`Cmd+Q`) and reopen it**.
 
-### Uninstall / Restore
+> Installs to `/Applications/Antigravity.app` by default; for a custom location, run `node scripts/install.js --target "<path-to-app.asar>"`.
+
+### Update & Uninstall
 
 ```bash
-# Losslessly restore the original unmodified app.asar
-npm run hud:restore
+# Update plugin (or reinstall after an Antigravity update)
+cd ag-vario && git pull && npm run hud:install
+
+# Uninstall and losslessly restore the original app.asar
+cd ag-vario && npm run hud:restore
 ```
 
-Restart Antigravity afterward to finish restoring.
+Restart Antigravity afterward to apply changes.
 
 ### Installing with an AI Assistant
 
-If you ask an AI assistant to install `ag-vario`:
-1. Run `npm run hud:install` in the repository root (optionally run `npm test` first).
-2. Do not force-kill a running Antigravity process; quit (`Cmd+Q`) and reopen manually after installation finishes.
+Paste this into Antigravity:
+
+> Clone `https://github.com/Staaaying/ag-vario` locally and install it following the README. Do not force-kill Antigravity; let me know when to restart manually.
 
 ---
 

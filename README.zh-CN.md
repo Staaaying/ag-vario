@@ -60,31 +60,37 @@
 
 ## 快速开始
 
-**环境要求**：macOS · Antigravity 2.0 桌面端（已验证版本 `v2.34.0`）· Node.js `>= 22.5.0`
+**环境要求**：macOS · Antigravity 2.0 桌面端（已验证版本 `v2.34.0`）· Node.js `>= 22.5.0`（零依赖，无需 `npm install`）
 
 ### 安装
 
 ```bash
-# 备份原版 app.asar 并安装插件
+git clone https://github.com/Staaaying/ag-vario.git
+cd ag-vario
 npm run hud:install
 ```
 
 安装完成后，**完全退出 Antigravity（`Cmd+Q`）并重新打开**即可生效。
 
-### 卸载 / 还原
+> 默认安装至 `/Applications/Antigravity.app`；如路径不同，可执行 `node scripts/install.js --target "<app.asar 路径>"`。
+
+### 更新与卸载
 
 ```bash
-# 无损还原为安装前的官方原版 app.asar
-npm run hud:restore
+# 更新插件（或 Antigravity 升级后重装）
+cd ag-vario && git pull && npm run hud:install
+
+# 卸载并无损还原原版 app.asar
+cd ag-vario && npm run hud:restore
 ```
 
-还原后重启 Antigravity 即可。
+操作完成后重启 Antigravity 即可。
 
 ### 交给 AI 助手安装
 
-如果让 AI 助手代为安装，请提示它：
-1. 在项目根目录执行 `npm run hud:install`（可先跑 `npm test`）。
-2. 不要强杀运行中的 Antigravity 进程，完成后由你手动 `Cmd+Q` 重启。
+直接在 Antigravity 中发送即可：
+
+> 帮我把 `https://github.com/Staaaying/ag-vario` 克隆到本地并按 README 完成安装，不要强杀 Antigravity，装完提醒我手动重启。
 
 ---
 
