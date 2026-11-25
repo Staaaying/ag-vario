@@ -142,7 +142,9 @@
     strokeWidth = 2.2,
     fraction = null,
     color = COLORS.iceBlue,
-    trackColor = COLORS.track
+    trackColor = COLORS.track,
+    centerText = '',
+    centerColor = 'rgba(242, 244, 248, 0.92)'
   } = {}) {
     const r = (size - strokeWidth) / 2;
     const c = 2 * Math.PI * r;
@@ -150,12 +152,24 @@
       fraction !== null && fraction !== undefined && Number.isFinite(Number(fraction))
         ? Math.max(0, Math.min(1, Number(fraction)))
         : 0;
-    const offset = c * (1 - clamped);
     const cx = size / 2;
+    const offset = c * (1 - clamped);
+    const label = String(centerText ?? '').trim();
+
+    let textEl = '';
+    if (label) {
+      const baseFs = size <= 14 ? 7.4 : size <= 16 ? 8.8 : size * 0.56;
+      const fs = (label.length > 1 ? baseFs * 0.78 : baseFs).toFixed(2);
+      const ls = label.length > 1 ? '-0.04em' : '0';
+      textEl = `<text data-ring-label="true" x="${cx}" y="${cx}" dy="0.355em" text-anchor="middle" fill="${centerColor}" font-size="${fs}" font-weight="700" style="font-variant-numeric:tabular-nums;letter-spacing:${ls};">${escapeHtml(label)}</text>`;
+    }
+
+    const textAttr = label ? ` data-ring-text="${escapeHtml(label)}"` : '';
     return [
-      `<svg class="agv-ring-svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">`,
+      `<svg class="agv-ring-svg"${textAttr} width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">`,
       `<circle cx="${cx}" cy="${cx}" r="${r.toFixed(2)}" fill="none" stroke="${trackColor}" stroke-width="${strokeWidth}"/>`,
       `<circle cx="${cx}" cy="${cx}" r="${r.toFixed(2)}" fill="none" stroke="${color}" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-dasharray="${c.toFixed(2)}" stroke-dashoffset="${offset.toFixed(2)}" transform="rotate(-90 ${cx} ${cx})"/>`,
+      textEl,
       '</svg>'
     ].join('');
   }
@@ -435,6 +449,34 @@
     .agv-ctx-tok { text-align: right; }
     .agv-ctx-sep { text-align: center; color: rgba(242, 244, 248, 0.34); }
     .agv-ctx-pct { text-align: right; }
+    .agv-compact-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 5.5px 10px;
+      border-radius: 8px;
+      background: rgba(125, 184, 232, 0.11);
+      border: 1px solid rgba(125, 184, 232, 0.28);
+      font-size: 10.5px;
+      line-height: 1.3;
+      white-space: nowrap;
+    }
+    .agv-compact-left {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-weight: 600;
+      color: ${COLORS.iceBlue};
+      flex-shrink: 0;
+    }
+    .agv-compact-right {
+      font-weight: 500;
+      color: rgba(198, 224, 246, 0.88);
+      text-align: right;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     .agv-sub-list {
       display: flex;
       flex-direction: column;

@@ -56,10 +56,19 @@ function buildConversationFixture(dbPath, { wal = false, inputTokens = 1000 } = 
   db.prepare('INSERT INTO steps (idx, step_type, status, metadata, error_details) VALUES (?, ?, ?, ?, ?)').run(
     1, 15, 3, stepMeta, null
   );
+  db.prepare('INSERT INTO steps (idx, step_type, status, metadata, error_details) VALUES (?, ?, ?, ?, ?)').run(
+    2, 23, 3, stepMeta, null
+  );
 
+  const csmBuf = Buffer.concat([
+    fVarint(1, 2),
+    fVarint(2, 0),
+    fBytes(10, Buffer.concat([fVarint(1, 5000), fVarint(2, 2), fVarint(4, 512000)]))
+  ]);
   const cmBuf = Buffer.concat([
     fVarint(3, 1525),
     fBytes(4, Buffer.concat([fVarint(2, inputTokens), fVarint(3, 250), fVarint(5, 4000)])),
+    fBytes(9, csmBuf),
     fBytes(11, Buffer.concat([fVarint(1, 1), fVarint(2, 500000000)])),
     fBytes(12, Buffer.concat([fVarint(1, 2), fVarint(2, 0)])),
     fBytes(19, 'gemini-4-hydrogen'),
@@ -140,6 +149,13 @@ test('sqlite-reader: WAL-safe read-only summaries, incremental cache, and contex
     assert.equal(ctx.breakdownAvailable, true);
     assert.equal(ctx.exactPromptTokens, 5000);
     assert.equal(ctx.categories.reduce((s, c) => s + c.tokens, 0), 5000);
+
+    // Direct DB read exposes checkpointCount and chatStartMetadata compaction fields
+    const mainDetail = reader.readConversationDb(path.join(convDir, 'main-1.db'), { includeContext: false });
+    assert.equal(mainDetail.checkpointCount, 1);
+    assert.equal(mainDetail.calls[0].startStepIndex, 2);
+    assert.equal(mainDetail.calls[0].checkpointIndex, 0);
+    assert.equal(mainDetail.calls[0].truncationReason, 'TRUNCATION_REASON_MAX_TOKEN_LIMIT');
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

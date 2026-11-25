@@ -51,6 +51,47 @@ function extractMaxContextTokens(cm, raw) {
   return null;
 }
 
+function normalizeTruncationReason(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value <= 0) return null;
+    return value === 2 ? 'TRUNCATION_REASON_MAX_TOKEN_LIMIT' : `TRUNCATION_REASON_${Math.floor(value)}`;
+  }
+  const s = String(value).trim();
+  if (!s || s === '0' || s === 'TRUNCATION_REASON_UNSPECIFIED') return null;
+  return s;
+}
+
+function extractChatStartInfo(cm, raw) {
+  const csm =
+    cm?.chatStartMetadata ||
+    cm?.chat_start_metadata ||
+    raw?.chatStartMetadata ||
+    raw?.chat_start_metadata ||
+    null;
+  const cwm = csm?.contextWindowMetadata || csm?.context_window_metadata || null;
+
+  const rawStart = csm?.startStepIndex ?? csm?.start_step_index ?? cm?.startStepIndex ?? raw?.startStepIndex;
+  const startNum = Number(rawStart);
+  const startStepIndex =
+    rawStart !== undefined && rawStart !== null && rawStart !== '' && Number.isFinite(startNum) && startNum >= 0
+      ? Math.floor(startNum)
+      : null;
+
+  const rawCp = csm?.checkpointIndex ?? csm?.checkpoint_index ?? cm?.checkpointIndex ?? raw?.checkpointIndex;
+  const cpNum = Number(rawCp);
+  const checkpointIndex =
+    rawCp !== undefined && rawCp !== null && rawCp !== '' && Number.isFinite(cpNum)
+      ? Math.trunc(cpNum)
+      : null;
+
+  const truncationReason = normalizeTruncationReason(
+    cwm?.truncationReason ?? cwm?.truncation_reason ?? cm?.truncationReason ?? raw?.truncationReason
+  );
+
+  return { startStepIndex, checkpointIndex, truncationReason };
+}
+
 function normalizeCall(raw) {
   if (!raw || typeof raw !== 'object') return null;
   const cm = raw.chatModel && typeof raw.chatModel === 'object' ? raw.chatModel : raw;
@@ -68,6 +109,7 @@ function normalizeCall(raw) {
 
   const timestampMs = Number.isFinite(Number(raw.timestampMs)) ? Number(raw.timestampMs) : null;
   const dateKey = raw.dateKey || (timestampMs !== null ? toLocalDateKey(timestampMs) : null);
+  const chatStart = extractChatStartInfo(cm, raw);
 
   return {
     timestampMs,
@@ -88,7 +130,10 @@ function normalizeCall(raw) {
     totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
     ttftMs,
     streamingMs,
-    maxContextTokens: extractMaxContextTokens(cm, raw)
+    maxContextTokens: extractMaxContextTokens(cm, raw),
+    startStepIndex: chatStart.startStepIndex,
+    checkpointIndex: chatStart.checkpointIndex,
+    truncationReason: chatStart.truncationReason
   };
 }
 
@@ -130,6 +175,71 @@ function normalizeSubagentStatus(summary = {}) {
     return 'Error';
   }
   return 'Done';
+}
+
+function computeCompactionInfo(validCalls = [], checkpointCount = 0) {
+  let prevPromptTokens = null;
+  let maxStartStep = 0;
+  const seenStartSteps = new Set();
+  let maxCheckpointIdx = -1;
+  let truncationHits = 0;
+  const events = [];
+
+  for (const call of Array.isArray(validCalls) ? validCalls : []) {
+    const promptTokens = (call.inputTokens || 0) + (call.cacheReadTokens || 0);
+    const startStep =
+      Number.isInteger(call.startStepIndex) && call.startStepIndex > 0 ? call.startStepIndex : 0;
+    const cpIdx =
+      Number.isInteger(call.checkpointIndex) && call.checkpointIndex >= 0 ? call.checkpointIndex : null;
+
+    if (cpIdx !== null && cpIdx > maxCheckpointIdx) {
+      maxCheckpointIdx = cpIdx;
+    }
+    if (call.truncationReason) {
+      truncationHits++;
+    }
+
+    if (startStep > maxStartStep) {
+      maxStartStep = startStep;
+      seenStartSteps.add(startStep);
+      events.push({
+        startStepIndex: startStep,
+        beforeTokens: prevPromptTokens,
+        afterTokens: promptTokens > 0 ? promptTokens : null,
+        truncationReason: call.truncationReason || null,
+        timestampMs: call.timestampMs ?? null
+      });
+    } else if (call.truncationReason && events.length === 0) {
+      events.push({
+        startStepIndex: startStep || null,
+        beforeTokens: prevPromptTokens,
+        afterTokens: promptTokens > 0 ? promptTokens : null,
+        truncationReason: call.truncationReason,
+        timestampMs: call.timestampMs ?? null
+      });
+    }
+
+    if (promptTokens > 0) {
+      prevPromptTokens = promptTokens;
+    }
+  }
+
+  const count = Math.max(
+    toNonNegInt(checkpointCount),
+    seenStartSteps.size,
+    maxCheckpointIdx >= 0 ? maxCheckpointIdx + 1 : 0,
+    truncationHits
+  );
+  const lastEvent = events.length > 0 ? events[events.length - 1] : null;
+
+  return {
+    compacted: count > 0,
+    count,
+    lastBeforeTokens: lastEvent ? lastEvent.beforeTokens : null,
+    lastAfterTokens: lastEvent ? lastEvent.afterTokens : null,
+    lastTruncationReason: lastEvent ? lastEvent.truncationReason : null,
+    lastStartStepIndex: lastEvent ? lastEvent.startStepIndex : null
+  };
 }
 
 function computeSessionStats(input = {}) {
@@ -191,6 +301,7 @@ function computeSessionStats(input = {}) {
   const primaryModel = pickFirstValidModel(rawCalls);
   const latestModel = latestValid ? resolveModelIdentity(latestValid.modelInput) : primaryModel;
   const cost = calculateSessionCost(validCalls, primaryModel);
+  const compaction = computeCompactionInfo(validCalls, input.checkpointCount);
 
   return {
     conversationId: input.conversationId || '',
@@ -208,6 +319,7 @@ function computeSessionStats(input = {}) {
     modelTimeMs,
     currentContextTokens,
     waterline: computeContextWaterline(currentContextTokens, effectiveContextLimit),
+    compaction,
     primaryModel,
     latestModel,
     cost
@@ -281,6 +393,7 @@ module.exports = {
   isValidCall,
   pickFirstValidModel,
   normalizeSubagentStatus,
+  computeCompactionInfo,
   computeSessionStats,
   combineSessionWithSubagents
 };

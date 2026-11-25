@@ -174,6 +174,15 @@ function countUserTurnsFromSteps(steps = []) {
   return turns;
 }
 
+function countCheckpointsFromSteps(steps = []) {
+  let count = 0;
+  for (const s of Array.isArray(steps) ? steps : []) {
+    const t = s?.type ?? s?.stepType ?? s?.step_type;
+    if (t === 23 || t === 'CORTEX_STEP_TYPE_CHECKPOINT') count++;
+  }
+  return count;
+}
+
 function createCollector(options = {}) {
   const dataDir = options.dataDir || sqliteReader.DEFAULT_DATA_DIR;
   const stateDir = options.stateDir || DEFAULT_STATE_DIR;
@@ -466,6 +475,7 @@ function createCollector(options = {}) {
     const dbPath = path.join(dataDir, 'conversations', `${conversationId}.db`);
     let calls = null;
     let turns = null;
+    let checkpointCount = null;
     let lastStepHasError = false;
     let source = 'rpc';
 
@@ -485,6 +495,7 @@ function createCollector(options = {}) {
       try {
         const dbRes = sqliteReader.readConversationDb(dbPath, { includeContext: false });
         turns = dbRes.turns;
+        checkpointCount = dbRes.checkpointCount || 0;
         lastStepHasError = dbRes.lastStepHasError;
         if (!calls) {
           calls = dbRes.calls;
@@ -496,13 +507,16 @@ function createCollector(options = {}) {
     if (turns === null && client) {
       try {
         const traj = await client.getCascadeTrajectory(conversationId);
-        turns = countUserTurnsFromSteps(traj?.trajectory?.steps);
+        const steps = traj?.trajectory?.steps;
+        turns = countUserTurnsFromSteps(steps);
+        checkpointCount = countCheckpointsFromSteps(steps);
       } catch {}
     }
 
     return {
       calls: calls || [],
       turns: turns || 0,
+      checkpointCount: checkpointCount || 0,
       lastStepHasError,
       source
     };
@@ -522,6 +536,7 @@ function createCollector(options = {}) {
       conversationId,
       title: meta?.title || conversationId.slice(0, 8),
       turns: mainData.turns,
+      checkpointCount: mainData.checkpointCount,
       calls: mainData.calls,
       contextLimit: null
     });
@@ -535,6 +550,7 @@ function createCollector(options = {}) {
           conversationId,
           title: meta?.title || conversationId.slice(0, 8),
           turns: mainData.turns,
+          checkpointCount: mainData.checkpointCount,
           calls: mainData.calls,
           contextLimit: resolvedLimit
         })

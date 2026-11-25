@@ -54,7 +54,7 @@
           <span class="agv-num" data-slot="session-tok">—</span>
         </button>
         <button type="button" class="agv-trigger" data-trigger="context" aria-expanded="false" title="Context window">
-          <span data-slot="ctx-ring">${styles.buildSvgRing({ size: 14, strokeWidth: 2, fraction: 0, color: styles.COLORS.contextLevels.unknown })}</span>
+          <span data-slot="ctx-ring">${styles.buildSvgRing({ size: 16, strokeWidth: 1.85, fraction: 0, color: styles.COLORS.contextLevels.unknown })}</span>
           <span class="agv-num" data-slot="ctx-pct">—</span>
         </button>
         <button type="button" class="agv-trigger" data-trigger="subagents" aria-expanded="false" data-dim="true" title="Subagents">
@@ -215,6 +215,39 @@
       `;
     }
 
+    function formatCompactionParts(compaction) {
+      if (!compaction || !compaction.compacted || !compaction.count) return null;
+      const left = `Compacted ${compaction.count}×`;
+      const hasDelta = compaction.lastBeforeTokens > 0 && compaction.lastAfterTokens > 0;
+      const right = hasDelta
+        ? `${compaction.count > 1 ? 'Last ' : ''}${styles.formatTokensOneDecimal(compaction.lastBeforeTokens)} → ${styles.formatTokensOneDecimal(compaction.lastAfterTokens)}`
+        : '';
+      const ringText = compaction.count > 9 ? '9+' : String(compaction.count);
+      const tooltip = right ? `${left} · ${right}` : left;
+      return { left, right, ringText, tooltip };
+    }
+
+    function renderContextTrigger(wl) {
+      const compParts = formatCompactionParts(sessionData?.main?.compaction);
+      const color = styles.COLORS.contextLevels[wl?.level || 'unknown'];
+      slotCtxRing.innerHTML = styles.buildSvgRing({
+        size: 16,
+        strokeWidth: 1.85,
+        fraction: wl?.ratio ?? 0,
+        color,
+        centerText: compParts ? compParts.ringText : '',
+        centerColor: 'rgba(242, 244, 248, 0.92)'
+      });
+      const pctTxt = styles.formatContextPercentOneDecimal(wl);
+      slotCtxPct.textContent =
+        pctTxt || (wl?.usedTokens > 0 ? styles.formatTokensOneDecimal(wl.usedTokens) : '—');
+      btnContext.style.color = wl?.level && wl.level !== 'unknown' ? color : '';
+      btnContext.setAttribute('data-compacted', String(Boolean(compParts)));
+      btnContext.title = compParts
+        ? `Context window · ${compParts.tooltip}`
+        : 'Context window';
+    }
+
     function renderContextCard() {
       const ctx = contextState.data;
       const fallbackMain = sessionData?.main;
@@ -223,18 +256,22 @@
       const limitStr = wl?.contextLimit ? styles.formatTokensOneDecimal(wl.contextLimit) : null;
       const pctStr = styles.formatContextPercentOneDecimal(wl);
       const headerRight = limitStr ? (pctStr ? `${usedStr} / ${limitStr} · ${pctStr}` : `${usedStr} / ${limitStr}`) : usedStr;
+      const compParts = formatCompactionParts(fallbackMain?.compaction);
+      const compBannerHtml = compParts
+        ? `<div class="agv-compact-banner agv-num"><span class="agv-compact-left"><span class="agv-dot" style="background:${styles.COLORS.iceBlue};"></span><span>${styles.escapeHtml(compParts.left)}</span></span>${compParts.right ? `<span class="agv-compact-right">${styles.escapeHtml(compParts.right)}</span>` : ''}</div>`
+        : '';
 
       if (!ctx && !contextState.loading && !contextState.error && !fallbackMain) {
         return `<div class="agv-card"><div class="agv-card-head"><span class="agv-card-title">Context</span><span class="agv-card-sub agv-num">${styles.escapeHtml(headerRight)}</span></div><div class="agv-block agv-muted">No context data yet</div></div>`;
       }
       if (contextState.loading && !ctx) {
-        return `<div class="agv-card"><div class="agv-card-head"><span class="agv-card-title">Context</span><span class="agv-card-sub agv-num">${styles.escapeHtml(headerRight)}</span></div><div class="agv-block agv-muted">Calculating breakdown…</div></div>`;
+        return `<div class="agv-card"><div class="agv-card-head"><span class="agv-card-title">Context</span><span class="agv-card-sub agv-num">${styles.escapeHtml(headerRight)}</span></div>${compBannerHtml}<div class="agv-block agv-muted">Calculating breakdown…</div></div>`;
       }
       if (contextState.error && !ctx) {
-        return `<div class="agv-card"><div class="agv-card-head"><span class="agv-card-title">Context</span><span class="agv-card-sub agv-num">${styles.escapeHtml(headerRight)}</span></div><div class="agv-block agv-muted">${styles.escapeHtml(contextState.error)}</div></div>`;
+        return `<div class="agv-card"><div class="agv-card-head"><span class="agv-card-title">Context</span><span class="agv-card-sub agv-num">${styles.escapeHtml(headerRight)}</span></div>${compBannerHtml}<div class="agv-block agv-muted">${styles.escapeHtml(contextState.error)}</div></div>`;
       }
       if (!ctx || !ctx.breakdownAvailable) {
-        return `<div class="agv-card"><div class="agv-card-head"><span class="agv-card-title">Context</span><span class="agv-card-sub agv-num">${styles.escapeHtml(headerRight)}</span></div><div class="agv-block agv-muted">Breakdown unavailable</div></div>`;
+        return `<div class="agv-card"><div class="agv-card-head"><span class="agv-card-title">Context</span><span class="agv-card-sub agv-num">${styles.escapeHtml(headerRight)}</span></div>${compBannerHtml}<div class="agv-block agv-muted">Breakdown unavailable</div></div>`;
       }
 
       const rows = ctx.categories
@@ -263,6 +300,7 @@
             <span class="agv-card-title">Context</span>
             <span class="agv-card-sub agv-num">${styles.escapeHtml(headerRight)}</span>
           </div>
+          ${compBannerHtml}
           <div class="agv-block agv-ctx-list">${rows}</div>
         </div>
       `;
@@ -369,18 +407,7 @@
       const main = sessionData?.main;
       slotSessionTok.textContent = main ? styles.formatTokensOneDecimal(sessionData.totalTokens) : '—';
 
-      const wl = main?.waterline;
-      const color = styles.COLORS.contextLevels[wl?.level || 'unknown'];
-      slotCtxRing.innerHTML = styles.buildSvgRing({
-        size: 14,
-        strokeWidth: 2,
-        fraction: wl?.ratio ?? 0,
-        color
-      });
-      const pctTxt = styles.formatContextPercentOneDecimal(wl);
-      slotCtxPct.textContent =
-        pctTxt || (wl?.usedTokens > 0 ? styles.formatTokensOneDecimal(wl.usedTokens) : '—');
-      btnContext.style.color = wl?.level && wl.level !== 'unknown' ? color : '';
+      renderContextTrigger(main?.waterline);
 
       const sub = sessionData?.subagentSummary;
       slotSubBadge.textContent = sub ? sub.badgeText : '0';
@@ -397,17 +424,7 @@
         error
       };
       if (data?.waterline) {
-        const wl = data.waterline;
-        const color = styles.COLORS.contextLevels[wl.level || 'unknown'];
-        slotCtxRing.innerHTML = styles.buildSvgRing({
-          size: 14,
-          strokeWidth: 2,
-          fraction: wl.ratio ?? 0,
-          color
-        });
-        const pctTxt = styles.formatContextPercentOneDecimal(wl);
-        slotCtxPct.textContent =
-          pctTxt || (wl.usedTokens > 0 ? styles.formatTokensOneDecimal(wl.usedTokens) : '—');
+        renderContextTrigger(data.waterline);
       }
       if (openCard === 'context') renderPopover();
     }

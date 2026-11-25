@@ -276,10 +276,10 @@
         doc,
         win,
         hostId: null,
-        onOpenCard: (cardName) => {
+        onOpenCard: () => {
           closeAllComposers(entry.key);
           topbar?.close();
-          if (cardName !== 'context' && entry.conversationId && Date.now() - entry.lastRefreshedAtMs > 4000) {
+          if (entry.conversationId && Date.now() - entry.lastRefreshedAtMs > 4000) {
             void refreshPaneSession(entry);
           }
         },

@@ -161,13 +161,16 @@ function readConversationDb(dbPath, { includeContext = false, fallbackTimestampM
       .all();
 
     let turns = 0;
+    let checkpointCount = 0;
     let errorStepCount = 0;
     let lastStepHasError = false;
     const stepTimeByIdx = new Map();
 
     for (let i = 0; i < stepRows.length; i++) {
       const s = stepRows[i];
-      if (Number(s.step_type) === 14) turns++;
+      const stepType = Number(s.step_type);
+      if (stepType === 14) turns++;
+      if (stepType === 23) checkpointCount++;
       const hasErr = Boolean(s.error_details && s.error_details.length > 0);
       if (hasErr) errorStepCount++;
       if (i === stepRows.length - 1) lastStepHasError = hasErr;
@@ -216,7 +219,10 @@ function readConversationDb(dbPath, { includeContext = false, fallbackTimestampM
         responseOutputTokens: cm.usage.responseOutputTokens,
         ttftMs: cm.ttftMs,
         streamingMs: cm.streamingMs,
-        maxContextTokens: cm.maxContextTokens ?? null
+        maxContextTokens: cm.maxContextTokens ?? null,
+        startStepIndex: cm.startStepIndex ?? null,
+        checkpointIndex: cm.checkpointIndex ?? null,
+        truncationReason: cm.truncationReason ?? null
       });
     }
 
@@ -230,6 +236,7 @@ function readConversationDb(dbPath, { includeContext = false, fallbackTimestampM
 
     return {
       turns,
+      checkpointCount,
       errorStepCount,
       lastStepHasError,
       calls,

@@ -134,4 +134,69 @@ test('session: combineSessionWithSubagents aggregates running/done/error and mix
   assert.equal(autoCtx.waterline.contextLimit, 512000);
   assert.equal(autoCtx.waterline.percent, 50);
   assert.equal(autoCtx.waterline.level, 'orange');
+  assert.equal(autoCtx.compaction.compacted, false);
+  assert.equal(autoCtx.compaction.count, 0);
+});
+
+test('session: computeSessionStats tracks 0x, 1x, 3x compaction and checkpoint-only state', () => {
+  const oneCompact = session.computeSessionStats({
+    conversationId: 'c-1x',
+    checkpointCount: 1,
+    calls: [
+      {
+        chatModel: {
+          modelDisplayName: 'Gemini 4 Neon (XHigh)',
+          usage: { inputTokens: 14867, cacheReadTokens: 500000 },
+          chatStartMetadata: { checkpointIndex: -1, contextWindowMetadata: { maxContextTokens: 512000 } }
+        }
+      },
+      {
+        chatModel: {
+          modelDisplayName: 'Gemini 4 Neon (XHigh)',
+          usage: { inputTokens: 23014, cacheReadTokens: 0 },
+          chatStartMetadata: {
+            startStepIndex: 44,
+            contextWindowMetadata: {
+              truncationReason: 'TRUNCATION_REASON_MAX_TOKEN_LIMIT',
+              maxContextTokens: 512000
+            }
+          }
+        }
+      }
+    ]
+  });
+  assert.equal(oneCompact.compaction.compacted, true);
+  assert.equal(oneCompact.compaction.count, 1);
+  assert.equal(oneCompact.compaction.lastBeforeTokens, 514867);
+  assert.equal(oneCompact.compaction.lastAfterTokens, 23014);
+  assert.equal(oneCompact.compaction.lastTruncationReason, 'TRUNCATION_REASON_MAX_TOKEN_LIMIT');
+  assert.equal(oneCompact.compaction.lastStartStepIndex, 44);
+
+  const threeCompacts = session.computeSessionStats({
+    conversationId: 'c-3x',
+    checkpointCount: 3,
+    calls: [
+      { chatModel: { usage: { inputTokens: 164300, cacheReadTokens: 0 }, chatStartMetadata: { checkpointIndex: -1 } } },
+      { chatModel: { usage: { inputTokens: 21220, cacheReadTokens: 0 }, chatStartMetadata: { startStepIndex: 44, contextWindowMetadata: { truncationReason: 'TRUNCATION_REASON_MAX_TOKEN_LIMIT' } } } },
+      { chatModel: { usage: { inputTokens: 17348, cacheReadTokens: 500000 }, chatStartMetadata: { startStepIndex: 44 } } },
+      { chatModel: { usage: { inputTokens: 26617, cacheReadTokens: 0 }, chatStartMetadata: { startStepIndex: 159, checkpointIndex: 1, contextWindowMetadata: { truncationReason: 'TRUNCATION_REASON_MAX_TOKEN_LIMIT' } } } },
+      { chatModel: { usage: { inputTokens: 14867, cacheReadTokens: 500000 }, chatStartMetadata: { startStepIndex: 159, checkpointIndex: 1 } } },
+      { chatModel: { usage: { inputTokens: 23014, cacheReadTokens: 0 }, chatStartMetadata: { startStepIndex: 208, checkpointIndex: 2, contextWindowMetadata: { truncationReason: 'TRUNCATION_REASON_MAX_TOKEN_LIMIT' } } } }
+    ]
+  });
+  assert.equal(threeCompacts.compaction.compacted, true);
+  assert.equal(threeCompacts.compaction.count, 3);
+  assert.equal(threeCompacts.compaction.lastBeforeTokens, 514867);
+  assert.equal(threeCompacts.compaction.lastAfterTokens, 23014);
+  assert.equal(threeCompacts.compaction.lastStartStepIndex, 208);
+
+  const cpOnly = session.computeSessionStats({
+    conversationId: 'c-cp-only',
+    checkpointCount: 1,
+    calls: [{ chatModel: { usage: { inputTokens: 400000, cacheReadTokens: 0 } } }]
+  });
+  assert.equal(cpOnly.compaction.compacted, true);
+  assert.equal(cpOnly.compaction.count, 1);
+  assert.equal(cpOnly.compaction.lastBeforeTokens, null);
+  assert.equal(cpOnly.compaction.lastAfterTokens, null);
 });

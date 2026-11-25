@@ -247,6 +247,9 @@ function parseChatModelMetadata(buf, includeContext) {
     streamingMs: null,
     maxContextTokens: null,
     estimatedTokensUsed: null,
+    startStepIndex: null,
+    checkpointIndex: null,
+    truncationReason: null,
     hasContextPayload: false
   };
   if (includeContext) {
@@ -262,11 +265,23 @@ function parseChatModelMetadata(buf, includeContext) {
       cm.usage = parseUsageStats(cf.value);
     } else if (cf.field === 9 && cf.wire === 2) {
       for (const sf of decodeFields(cf.value)) {
-        if (sf.field === 10 && sf.wire === 2) {
+        if (sf.field === 1 && sf.wire === 0) {
+          const v = Number(sf.value);
+          if (Number.isFinite(v) && v >= 0) cm.startStepIndex = v;
+        } else if (sf.field === 2 && sf.wire === 0) {
+          const v = Number(BigInt.asIntN(64, sf.value));
+          if (Number.isFinite(v)) cm.checkpointIndex = v;
+        } else if (sf.field === 10 && sf.wire === 2) {
           for (const cwf of decodeFields(sf.value)) {
             if (cwf.field === 1 && cwf.wire === 0) {
               const est = Number(cwf.value);
               if (Number.isFinite(est) && est >= 0) cm.estimatedTokensUsed = est;
+            } else if (cwf.field === 2 && cwf.wire === 0) {
+              const tr = Number(cwf.value);
+              if (Number.isFinite(tr) && tr > 0) {
+                cm.truncationReason =
+                  tr === 2 ? 'TRUNCATION_REASON_MAX_TOKEN_LIMIT' : `TRUNCATION_REASON_${Math.floor(tr)}`;
+              }
             } else if (cwf.field === 4 && cwf.wire === 0) {
               const maxCtx = Number(cwf.value);
               if (Number.isFinite(maxCtx) && maxCtx > 0) cm.maxContextTokens = maxCtx;

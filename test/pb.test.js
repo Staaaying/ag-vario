@@ -117,8 +117,16 @@ test('pb: parseStepMetadata and parseGenMetadata fast vs context mode', () => {
     encodeFieldBytes(1, 'model_enum'),
     encodeFieldBytes(2, 'MODEL_PLACEHOLDER_M525')
   ]);
-  const ctxWinMeta = Buffer.concat([encodeFieldVarint(1, 386379), encodeFieldVarint(4, 512000)]);
-  const chatStartMeta = encodeFieldBytes(10, ctxWinMeta);
+  const ctxWinMeta = Buffer.concat([
+    encodeFieldVarint(1, 386379),
+    encodeFieldVarint(2, 2),
+    encodeFieldVarint(4, 512000)
+  ]);
+  const chatStartMeta = Buffer.concat([
+    encodeFieldVarint(1, 44),
+    encodeFieldVarint(2, 1),
+    encodeFieldBytes(10, ctxWinMeta)
+  ]);
   const cmBuf = Buffer.concat([
     encodeFieldVarint(3, 1525),
     encodeFieldBytes(4, usageBuf),
@@ -148,6 +156,9 @@ test('pb: parseStepMetadata and parseGenMetadata fast vs context mode', () => {
   assert.equal(fast.chatModel.streamingMs, 4000);
   assert.equal(fast.chatModel.maxContextTokens, 512000);
   assert.equal(fast.chatModel.estimatedTokensUsed, 386379);
+  assert.equal(fast.chatModel.startStepIndex, 44);
+  assert.equal(fast.chatModel.checkpointIndex, 1);
+  assert.equal(fast.chatModel.truncationReason, 'TRUNCATION_REASON_MAX_TOKEN_LIMIT');
   assert.equal(fast.chatModel.hasContextPayload, true);
   assert.equal(fast.chatModel.promptSections, undefined);
 

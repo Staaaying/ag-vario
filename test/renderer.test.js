@@ -354,6 +354,23 @@ test('styles: formatting helpers and CSS silence/no-infinite-animation contract'
   assert.ok(styles.SHARED_CSS.includes('::-webkit-scrollbar-thumb'));
   assert.equal(css.includes('@keyframes'), false);
   assert.equal(/\binfinite\b/i.test(css), false);
+
+  const normalRing = styles.buildSvgRing({ size: 16, strokeWidth: 1.85, fraction: 0.4, color: '#68c28c' });
+  assert.equal(normalRing.includes('data-ring-text'), false);
+  assert.equal(normalRing.includes('data-ring-label'), false);
+
+  const countRing = styles.buildSvgRing({ size: 16, strokeWidth: 1.85, fraction: 0.4, color: '#68c28c', centerText: '3' });
+  assert.ok(countRing.includes('data-ring-text="3"'));
+  assert.ok(countRing.includes('data-ring-label="true"'));
+  assert.ok(countRing.includes('text-anchor="middle"'));
+  assert.ok(countRing.includes('dy="0.355em"'));
+  assert.ok(countRing.includes('rgba(242, 244, 248, 0.92)'));
+  assert.ok(countRing.includes('>3</text>'));
+
+  const overflowRing = styles.buildSvgRing({ size: 16, strokeWidth: 1.85, fraction: 0.2, color: '#e0a054', centerText: '9+' });
+  assert.ok(overflowRing.includes('data-ring-text="9+"'));
+  assert.ok(overflowRing.includes('letter-spacing:-0.04em'));
+  assert.ok(overflowRing.includes('>9+</text>'));
 });
 
 test('mount: parseActiveConversationFromUrl handles single, split %2B with focused, and non-chat URLs', () => {
@@ -979,6 +996,97 @@ test('composer-bar: Session card renders aligned 3-tier layout, effort model nam
     assert.equal(popWithSub.includes('Main $3.42'), false);
     assert.ok(popWithSub.includes('$4.12'));
     assert.ok(popWithSub.includes('5.1M'));
+  } finally {
+    bar.dispose();
+  }
+});
+
+test('composer-bar: 16px Lap Ring counter and Ice Blue aligned compaction banner render accurately and survive updateContext', () => {
+  const { win, doc } = createFakeDom();
+  const bar = composerBar.createComposerBar({ doc, win });
+  try {
+    const makeMain = (compaction) => ({
+      turns: 4,
+      steps: 18,
+      inputTokens: 12000,
+      outputTokens: 3000,
+      cacheReadTokens: 11000,
+      totalTokens: 26000,
+      cacheHitRate: 0.48,
+      avgTtftMs: 1200,
+      outputSpeedTps: 120,
+      modelTimeMs: 15000,
+      waterline: { usedTokens: 23014, contextLimit: 512000, ratio: 23014 / 512000, percent: 4, level: 'green' },
+      compaction,
+      primaryModel: { displayName: 'Gemini 4 Neon', displayNameWithEffort: 'Gemini 4 Neon (xhigh)' },
+      cost: { priced: true, costUsd: 0.12 }
+    });
+
+    // Uncompacted: 16px ring, empty center, no banner
+    bar.updateSession({
+      main: makeMain({ compacted: false, count: 0, lastBeforeTokens: null, lastAfterTokens: null }),
+      totalTokens: 26000,
+      totalCost: { priced: true, costUsd: 0.12, hasUnpriced: false },
+      subagentSummary: { runningCount: 0, totalCount: 0, hasRunning: false, badgeText: '0', items: [] }
+    });
+    assert.equal(bar.shadow.querySelector('[data-trigger="context"]').getAttribute('data-compacted'), 'false');
+    const uncompRing = bar.shadow.querySelector('[data-slot="ctx-ring"]').innerHTML;
+    assert.ok(uncompRing.includes('width="16"'));
+    assert.equal(uncompRing.includes('data-ring-label'), false);
+
+    // 1x compacted
+    bar.updateSession({
+      main: makeMain({ compacted: true, count: 1, lastBeforeTokens: 514867, lastAfterTokens: 23014 }),
+      totalTokens: 26000,
+      totalCost: { priced: true, costUsd: 0.12, hasUnpriced: false },
+      subagentSummary: { runningCount: 0, totalCount: 0, hasRunning: false, badgeText: '0', items: [] }
+    });
+    assert.equal(bar.shadow.querySelector('[data-trigger="context"]').getAttribute('data-compacted'), 'true');
+    const ring1x = bar.shadow.querySelector('[data-slot="ctx-ring"]').innerHTML;
+    assert.ok(ring1x.includes('width="16"'));
+    assert.ok(ring1x.includes('data-ring-text="1"'));
+    assert.ok(ring1x.includes('>1</text>'));
+
+    bar.openCard('context');
+    bar.updateContext({
+      breakdownAvailable: true,
+      exactPromptTokens: 23014,
+      waterline: { usedTokens: 23014, contextLimit: 512000, ratio: 23014 / 512000, percent: 4, level: 'green' },
+      categories: [{ key: 'system_prompt', label: 'System Prompt', tokens: 23014, percent: 100 }]
+    });
+    // Preserves centered count inside 16px ring after updateContext
+    assert.ok(bar.shadow.querySelector('[data-slot="ctx-ring"]').innerHTML.includes('data-ring-text="1"'));
+    const html1x = bar.shadow.querySelector('.agv-popover').innerHTML;
+    assert.ok(html1x.includes('agv-compact-banner'));
+    assert.ok(html1x.includes('agv-compact-left'));
+    assert.ok(html1x.includes('agv-compact-right'));
+    assert.ok(html1x.includes('Compacted 1×'));
+    assert.ok(html1x.includes('514.9K → 23.0K'));
+    assert.ok(html1x.includes(styles.COLORS.iceBlue));
+    assert.equal(html1x.includes('#c49bf5'), false);
+    assert.ok(html1x.indexOf('agv-compact-banner') < html1x.indexOf('agv-ctx-list'));
+
+    // 3x compacted -> ring shows "3", right side includes "Last "
+    bar.updateSession({
+      main: makeMain({ compacted: true, count: 3, lastBeforeTokens: 514867, lastAfterTokens: 23014 }),
+      totalTokens: 26000,
+      totalCost: { priced: true, costUsd: 0.12, hasUnpriced: false },
+      subagentSummary: { runningCount: 0, totalCount: 0, hasRunning: false, badgeText: '0', items: [] }
+    });
+    assert.ok(bar.shadow.querySelector('[data-slot="ctx-ring"]').innerHTML.includes('data-ring-text="3"'));
+    const html3x = bar.shadow.querySelector('.agv-popover').innerHTML;
+    assert.ok(html3x.includes('Compacted 3×'));
+    assert.ok(html3x.includes('Last 514.9K → 23.0K'));
+
+    // 12x compacted -> ring caps at "9+", banner keeps exact "Compacted 12×"
+    bar.updateSession({
+      main: makeMain({ compacted: true, count: 12, lastBeforeTokens: 514867, lastAfterTokens: 23014 }),
+      totalTokens: 26000,
+      totalCost: { priced: true, costUsd: 0.12, hasUnpriced: false },
+      subagentSummary: { runningCount: 0, totalCount: 0, hasRunning: false, badgeText: '0', items: [] }
+    });
+    assert.ok(bar.shadow.querySelector('[data-slot="ctx-ring"]').innerHTML.includes('data-ring-text="9+"'));
+    assert.ok(bar.shadow.querySelector('.agv-popover').innerHTML.includes('Compacted 12×'));
   } finally {
     bar.dispose();
   }

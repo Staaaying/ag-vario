@@ -38,10 +38,12 @@ function buildConversationDb(dbPath, { inputTokens = 1000, sectionText = 'System
   const stepMeta = fBytes(1, tsBuf);
   db.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(0, 14, 3, stepMeta, null);
   db.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(1, 15, 3, stepMeta, null);
+  db.prepare('INSERT INTO steps VALUES (?, ?, ?, ?, ?)').run(2, 23, 3, stepMeta, null);
 
   const cmBuf = Buffer.concat([
     fVarint(3, 1525),
     fBytes(4, Buffer.concat([fVarint(2, inputTokens), fVarint(3, 200), fVarint(5, 3000)])),
+    fBytes(9, Buffer.concat([fVarint(1, 2), fBytes(10, fVarint(2, 2))])),
     fBytes(19, 'gemini-4-hydrogen'),
     fBytes(21, 'Gemini 4 Hydrogen (High)'),
     fBytes(16, Buffer.concat([fBytes(1, 'identity'), fBytes(2, sectionText), fVarint(6, 1)])),
@@ -140,6 +142,10 @@ test('collector: quota TTL, session RPC + SQLite fallback, on-demand context, us
                 chatModel: {
                   modelDisplayName: 'Gemini 4 Hydrogen (High)',
                   usage: { inputTokens: id === 'main-1' ? 5000 : 2000, outputTokens: 300, cacheReadTokens: 10000 },
+                  chatStartMetadata:
+                    id === 'main-1'
+                      ? { startStepIndex: 2, contextWindowMetadata: { truncationReason: 'TRUNCATION_REASON_MAX_TOKEN_LIMIT' } }
+                      : undefined,
                   timeToFirstToken: '1.5s',
                   streamingDuration: '3.0s'
                 }
@@ -173,6 +179,8 @@ test('collector: quota TTL, session RPC + SQLite fallback, on-demand context, us
     assert.equal(s1.source, 'rpc');
     assert.equal(s1.data.main.turns, 1);
     assert.equal(s1.data.main.waterline.contextLimit, 1000000);
+    assert.equal(s1.data.main.compaction.compacted, true);
+    assert.equal(s1.data.main.compaction.count, 1);
     assert.equal(s1.data.subagentSummary.badgeText, '1/1');
 
     // 3. Context breakdown on-demand (RPC) and fallback (SQLite)
@@ -185,6 +193,8 @@ test('collector: quota TTL, session RPC + SQLite fallback, on-demand context, us
     const sFallback = await collector.getSessionSnapshot({ origin: 'https://127.0.0.1:45000', conversationId: 'main-1' });
     assert.equal(sFallback.ok, true);
     assert.equal(sFallback.source, 'sqlite');
+    assert.equal(sFallback.data.main.compaction.compacted, true);
+    assert.equal(sFallback.data.main.compaction.count, 1);
 
     const cFallback = await collector.getContextBreakdown({ origin: 'https://127.0.0.1:45000', conversationId: 'main-1' });
     assert.equal(cFallback.ok, true);
