@@ -43,8 +43,8 @@ Mounted inside each visible chat composer before the right-hand controls (separa
    - **Persistent**: Icon + total session tokens (main + subagents).
    - **Popover**: Total tokens & single `Est.` USD total, `turns · steps`, primary model with reasoning effort; `Token Breakdown` stacked bar (`Cache` / `Input` / `Output`) + `Hit` rate; `Avg TTFT`, `Speed`, and `Model Time`.
 2. **`Context`**
-   - **Persistent**: Mini progress ring + context percentage (`<50%` green, `50%–79%` orange, `≥80%` red).
-   - **Popover**: `used / limit · percent` header + on-demand 5-category breakdown (proportional estimate scaled to exact prompt tokens): `System Prompt`, `Skills & Rules`, `MCP Tools`, `Built-in Tools`, and `Messages & Outputs`.
+   - **Persistent**: `16px` mini progress ring + context percentage (`<50%` green, `50%–79%` orange, `≥80%` red); when compacted, the compaction count (`1`..`9+`) is centered inside the ring in bright white (empty when uncompacted).
+   - **Popover**: `used / limit · percent` header, an Ice Blue left-right aligned compaction notice (`Compacted N×` | `Last ... → ...` when compacted) above the on-demand 5-category breakdown (proportional estimate scaled to exact prompt tokens): `System Prompt`, `Skills & Rules`, `MCP Tools`, `Built-in Tools`, and `Messages & Outputs`.
 3. **`Subagents`**
    - **Persistent**: Icon + `0` (dimmed) or `running/total` (highlighted when active).
    - **Popover**: List of child subagents and workflow agents with status (`Running` / `Done` / `Error`), model, and context usage.
@@ -58,12 +58,12 @@ Two subtle pills in the titlebar, opening downward:
    - **Popover (`338px`)**: `Quota` + full subscription badge (e.g. `Google AI Ultra (5x)`) + `Updated HH:MM` + manual refresh; per-pool cards (`Gemini Models`, `Claude and GPT models`, etc.) with `5h limit` / `Weekly limit` progress bars, single-line right-aligned reset countdowns (`· Resets in ...`), and per-pool `Last reset` + weekly burn pace.
 2. **`Usage`**
    - **Persistent**: Icon + `Today` total tokens.
-   - **Popover (`420px`)**: Profile avatar, display name, full subscription badge, email, and `7 Days | 30 Days | All` selector; 5-cell summary (`Tokens`, `Est. Cost`, `Daily Avg`, `Per Chat`, `Daily Time`); 30-day `Token Activity` dot heatmap (hover for day totals, click to filter `By Model` and `Top 3 Sessions` — clicking >7 days ago auto-switches `7 Days` → `30 Days`); `By Model` horizontal bars (`Est. USD`); and `Top 3 Sessions` (root + child subagent rollups).
+   - **Popover (`420px`)**: Profile avatar, display name, full subscription badge, email, and `7 Days | 30 Days | All` selector; 5-cell summary (`Tokens`, `Est. Cost`, `Daily Avg`, `Per Chat`, `Daily Time`); 30-day `Token Activity` rounded-square heatmap (hover for day totals, click to filter `Model Breakdown` and `Top 3 Sessions` — clicking >7 days ago auto-switches `7 Days` → `30 Days`); `Model Breakdown` horizontal bars (`Est. Cost (USD)`); and `Top 3 Sessions` (root + child subagent rollups).
 
 ---
 
 ## 4. Data Sources & Accounting
 
-- **Exact host-reported values**: Context usage & limits, turns, steps, `inputTokens` / `outputTokens` / `cacheReadTokens`, cache hit rate (`cacheRead / (input + cacheRead)`), TTFT, output speed, model time, subagent/workflow tree, quota pool fractions & reset timestamps, and daily token totals.
+- **Exact host-reported values**: Context usage & limits, compaction checkpoints (`CORTEX_STEP_TYPE_CHECKPOINT` / `chatStartMetadata.startStepIndex` / `truncationReason`) & pre/post prompt tokens, turns, steps, `inputTokens` / `outputTokens` / `cacheReadTokens`, cache hit rate (`cacheRead / (input + cacheRead)`), TTFT, output speed, model time, subagent/workflow tree, quota pool fractions & reset timestamps, and daily token totals.
 - **Estimated values**: 5-category context breakdown (scaled to exact prompt tokens; note `MCP Tools` classification matches Protobuf definitions and has not yet been end-to-end verified against a live MCP server) and USD API cost (built-in official rates + daily HTTPS sync from official Gemini/Claude pricing pages, cached locally; unpriced models labeled `Unpriced`).
 - **Visual language (`Native Frosted`)**: Dark translucent backdrop blur, inherited host sans-serif typography with `tabular-nums` on numbers, and low-saturation Ice Blue (`#7db8e8`) as the primary data accent.
