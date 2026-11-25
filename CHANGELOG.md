@@ -2,7 +2,7 @@
 
 All notable changes to `ag-vario` are documented in this file.
 
-## [Unreleased] (`Antigravity v2.35.1 · Node >=22.13.0`)
+## [0.3.1] - 2026-11-25 (`Antigravity v2.35.1 · Node >=22.13.0`)
 
 ### Changed
 - Raised minimum required Node.js version from `>=22.5.0` to `>=22.13.0`.
