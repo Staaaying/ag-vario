@@ -5,9 +5,10 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { EventEmitter } = require('node:events');
 const { DatabaseSync } = require('node:sqlite');
 
-const { createCollector } = require('../src/main/collector');
+const { createCollector, httpsGetLimited } = require('../src/main/collector');
 const pricing = require('../src/core/pricing');
 
 function encodeVarint(value) {
@@ -338,6 +339,346 @@ test('collector: daily official pricing sync caches to stateDir, applies dynamic
     assert.ok(Math.abs(stillCached.costUsd - 3.2) < 1e-9);
   } finally {
     pricing.clearDynamicPricing();
+    fs.rmSync(rootTmp, { recursive: true, force: true });
+  }
+});
+
+
+test('collector: split-slot LRU preserves SQLite fallback after RPC, caches done subagents and summaries, and deduplicates usage scans', async () => {
+  const rootTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-vario-col-cache-'));
+  const dataDir = path.join(rootTmp, 'data');
+  const stateDir = path.join(rootTmp, 'state');
+  const convDir = path.join(dataDir, 'conversations');
+  fs.mkdirSync(convDir, { recursive: true });
+  fs.mkdirSync(stateDir, { recursive: true });
+
+  const sqliteReader = require('../src/main/sqlite-reader');
+  const origReadConvDb = sqliteReader.readConversationDb;
+  const origReadSummaries = sqliteReader.readConversationSummaries;
+  const origScanAsync = sqliteReader.scanConversationsIncrementalAsync;
+
+  try {
+    const sumDb = new DatabaseSync(path.join(dataDir, 'conversation_summaries.db'));
+    sumDb.exec(`
+      CREATE TABLE conversation_summaries (
+        conversation_id TEXT PRIMARY KEY, title TEXT DEFAULT '', preview TEXT DEFAULT '',
+        step_count INTEGER DEFAULT 0, last_modified_time TEXT NOT NULL, status TEXT DEFAULT '',
+        project_id TEXT DEFAULT '', agent_name TEXT DEFAULT '', parent_conversation_id TEXT DEFAULT '',
+        nesting_depth INTEGER DEFAULT 0, killed INTEGER DEFAULT 0, last_user_input_time TEXT NOT NULL,
+        raw_summary BLOB
+      );
+    `);
+    const ins = sumDb.prepare('INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    ins.run('main-1', 'Main', 'Main', 2, '2026-11-24 08:00:00+00:00',
+      'CASCADE_RUN_STATUS_IDLE', 'p1', '', '', 0, 0, '2026-11-24 08:00:00+00:00', fBytes(1, 'Main'));
+    ins.run('sub-done', '', '', 2, '2026-11-24 08:01:00+00:00',
+      'CASCADE_RUN_STATUS_IDLE', 'p1', 'self', 'main-1', 1, 0, '2026-11-24 08:01:00+00:00',
+      fBytes(17, Buffer.concat([fBytes(5, 'main-1'), fBytes(6, 'main-1'), fBytes(8, Buffer.concat([fBytes(1, 'self'), fBytes(2, 'DoneWorker')]))])));
+    sumDb.close();
+
+    buildConversationDb(path.join(convDir, 'main-1.db'), { inputTokens: 1100 });
+    buildConversationDb(path.join(convDir, 'sub-done.db'), { inputTokens: 2200 });
+
+    let rpcDown = false;
+    let convDbReads = [];
+    let summaryReads = 0;
+    let asyncScanCalls = 0;
+
+    sqliteReader.readConversationDb = function (dbPath, opts = {}) {
+      convDbReads.push({ base: path.basename(dbPath), includeCalls: opts.includeCalls !== false });
+      return origReadConvDb.call(this, dbPath, opts);
+    };
+    sqliteReader.readConversationSummaries = function (dir) {
+      summaryReads++;
+      return origReadSummaries.call(this, dir);
+    };
+    sqliteReader.scanConversationsIncrementalAsync = async function (opts) {
+      asyncScanCalls++;
+      return origScanAsync.call(this, opts);
+    };
+
+    const col = createCollector({
+      dataDir,
+      stateDir,
+      pricingSyncEnabled: false,
+      createRpcClientFn: () => ({
+        retrieveUserQuotaSummary: async () => ({ response: { groups: [] } }),
+        getUserStatus: async () => ({ userStatus: {} }),
+        getCascadeTrajectoryGeneratorMetadata: async () => {
+          if (rpcDown) throw new Error('RPC unavailable');
+          return {
+            generatorMetadata: [
+              {
+                chatModel: {
+                  modelDisplayName: 'Gemini 4 Hydrogen (High)',
+                  usage: { inputTokens: 5000, outputTokens: 200, cacheReadTokens: 10000 }
+                }
+              }
+            ]
+          };
+        }
+      })
+    });
+
+    // 1. First poll: RPC succeeds -> main-1 uses lightweight includeCalls=false, sub-done uses full, summary read once
+    const s1 = await col.getSessionSnapshot({ origin: 'https://127.0.0.1:45000', conversationId: 'main-1' });
+    assert.equal(s1.source, 'rpc');
+    assert.equal(summaryReads, 1);
+    assert.deepEqual(convDbReads, [
+      { base: 'main-1.db', includeCalls: false },
+      { base: 'sub-done.db', includeCalls: true }
+    ]);
+
+    // 2. Second poll with unchanged files: 0 SQLite DB reads, 0 summary reads
+    convDbReads = [];
+    const s2 = await col.getSessionSnapshot({ origin: 'https://127.0.0.1:45000', conversationId: 'main-1' });
+    assert.equal(s2.source, 'rpc');
+    assert.equal(summaryReads, 1);
+    assert.equal(convDbReads.length, 0);
+
+    // 3. RPC fails while main-1.db fingerprint is unchanged -> MUST NOT return empty calls from stepsOnly slot!
+    rpcDown = true;
+    const sFallback = await col.getSessionSnapshot({ origin: 'https://127.0.0.1:45000', conversationId: 'main-1' });
+    assert.equal(sFallback.source, 'sqlite');
+    assert.equal(sFallback.data.main.inputTokens, 1100);
+    assert.equal(sFallback.data.main.steps, 1);
+    assert.deepEqual(convDbReads, [{ base: 'main-1.db', includeCalls: true }]);
+
+    // 4. Subsequent poll with RPC still down hits the newly populated `full` slot
+    convDbReads = [];
+    const sFallbackCached = await col.getSessionSnapshot({ origin: 'https://127.0.0.1:45000', conversationId: 'main-1' });
+    assert.equal(sFallbackCached.data.main.inputTokens, 1100);
+    assert.equal(convDbReads.length, 0);
+
+    // 5. Mutating sub-done.db invalidates its fingerprint and re-reads only sub-done.db
+    const subMut = new DatabaseSync(path.join(convDir, 'sub-done.db'));
+    subMut.exec('PRAGMA journal_mode=WAL;');
+    subMut.prepare('UPDATE steps SET step_type = 14 WHERE idx = 1').run();
+    subMut.close();
+    const sAfterMut = await col.getSessionSnapshot({ origin: 'https://127.0.0.1:45000', conversationId: 'main-1' });
+    assert.equal(sAfterMut.ok, true);
+    assert.deepEqual(convDbReads, [{ base: 'sub-done.db', includeCalls: true }]);
+
+    // 6. Concurrent usage scans share a single in-flight scan
+    const [u1, u2] = await Promise.all([
+      col.getUsageReport({ period: '7D', force: true }),
+      col.getUsageReport({ period: '7D', force: true })
+    ]);
+    assert.equal(u1.ok, true);
+    assert.equal(u2.ok, true);
+    assert.equal(asyncScanCalls, 1);
+  } finally {
+    sqliteReader.readConversationDb = origReadConvDb;
+    sqliteReader.readConversationSummaries = origReadSummaries;
+    sqliteReader.scanConversationsIncrementalAsync = origScanAsync;
+    pricing.clearDynamicPricing();
+    fs.rmSync(rootTmp, { recursive: true, force: true });
+  }
+});
+
+
+test('collector: retries failed async usage cache persistence even when next scan hits memory cache', async () => {
+  const rootTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-vario-col-retry-'));
+  const dataDir = path.join(rootTmp, 'data');
+  const stateDir = path.join(rootTmp, 'state');
+  const convDir = path.join(dataDir, 'conversations');
+  fs.mkdirSync(convDir, { recursive: true });
+  fs.mkdirSync(stateDir, { recursive: true });
+
+  const sqliteReader = require('../src/main/sqlite-reader');
+  const origSaveAsync = sqliteReader.saveCacheAtomicAsync;
+  try {
+    buildConversationDb(path.join(convDir, 'conv-1.db'), { inputTokens: 900 });
+
+    let saveAttempts = 0;
+    let shouldFailSave = true;
+    sqliteReader.saveCacheAtomicAsync = async function (cachePath, cacheObj) {
+      saveAttempts++;
+      if (shouldFailSave) throw new Error('disk busy');
+      return origSaveAsync.call(this, cachePath, cacheObj);
+    };
+
+    const col = createCollector({ dataDir, stateDir, pricingSyncEnabled: false });
+
+    // First scan fails to persist cache, but still returns report
+    const r1 = await col.getUsageReport({ period: '7D', force: true });
+    assert.equal(r1.ok, true);
+    assert.equal(r1.scanStats.scanned, 1);
+    assert.equal(saveAttempts, 1);
+    assert.equal(fs.existsSync(path.join(stateDir, 'conversations-cache-v1.json')), false);
+
+    // Second scan hits memory cache (scanned === 0) and retries persistence
+    shouldFailSave = false;
+    const r2 = await col.getUsageReport({ period: '7D', force: true });
+    assert.equal(r2.ok, true);
+    assert.equal(r2.scanStats.scanned, 0);
+    assert.equal(saveAttempts, 2);
+    assert.equal(fs.existsSync(path.join(stateDir, 'conversations-cache-v1.json')), true);
+
+    // Third scan sees pending flag cleared and does not rewrite unchanged cache
+    const r3 = await col.getUsageReport({ period: '7D', force: true });
+    assert.equal(r3.ok, true);
+    assert.equal(saveAttempts, 2);
+  } finally {
+    sqliteReader.saveCacheAtomicAsync = origSaveAsync;
+    fs.rmSync(rootTmp, { recursive: true, force: true });
+  }
+});
+
+test('collector: getSessionSnapshot and getContextBreakdown reject traversal conversationId', async () => {
+  const rootTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-vario-col-sec-'));
+  try {
+    let rpcCalls = 0;
+    const col = createCollector({
+      dataDir: rootTmp,
+      stateDir: rootTmp,
+      pricingSyncEnabled: false,
+      createRpcClientFn: () => ({
+        getCascadeTrajectoryGeneratorMetadata: async () => {
+          rpcCalls++;
+          return {};
+        }
+      })
+    });
+
+    const sessRes = await col.getSessionSnapshot({
+      origin: 'https://127.0.0.1:45000',
+      conversationId: '../conversation_summaries'
+    });
+    assert.equal(sessRes.ok, false);
+    assert.match(sessRes.error, /Invalid conversationId/);
+
+    const ctxRes = await col.getContextBreakdown({
+      origin: 'https://127.0.0.1:45000',
+      conversationId: '../conversation_summaries'
+    });
+    assert.equal(ctxRes.ok, false);
+    assert.match(ctxRes.error, /Invalid conversationId/);
+    assert.equal(rpcCalls, 0);
+  } finally {
+    fs.rmSync(rootTmp, { recursive: true, force: true });
+  }
+});
+
+test('collector: httpsGetLimited handles 302 redirects, https-only, image type, size limit, and timeout', async () => {
+  function makeMockGet(handler) {
+    return (parsed, opts, cb) => {
+      const req = new EventEmitter();
+      req.destroyed = false;
+      req.destroy = (err) => {
+        if (req.destroyed) return;
+        req.destroyed = true;
+        if (err) queueMicrotask(() => req.emit('error', err));
+      };
+      req.setTimeout = (_ms, onTimeout) => {
+        req._onTimeout = onTimeout;
+      };
+      queueMicrotask(() => handler(parsed, opts, req, cb));
+      return req;
+    };
+  }
+
+  function makeRes(statusCode, headers, chunks = []) {
+    const res = new EventEmitter();
+    res.statusCode = statusCode;
+    res.headers = headers;
+    res.resume = () => {};
+    queueMicrotask(() => {
+      for (const ch of chunks) res.emit('data', ch);
+      res.emit('end');
+    });
+    return res;
+  }
+
+  // 1. Image 302 redirect (relative Location) succeeds with User-Agent: ag-vario
+  const seenUrls = [];
+  let seenUa = null;
+  const imgRes = await httpsGetLimited('https://example.com/avatar', {
+    requireImage: true,
+    getFn: makeMockGet((parsed, opts, _req, cb) => {
+      seenUrls.push(parsed.toString());
+      seenUa = opts.headers['User-Agent'];
+      if (parsed.pathname === '/avatar') {
+        cb(makeRes(302, { location: '/cdn/pic.png' }));
+      } else {
+        cb(makeRes(200, { 'content-type': 'image/png; charset=utf-8' }, [Buffer.from('PNGDATA')]));
+      }
+    })
+  });
+  assert.deepEqual(seenUrls, ['https://example.com/avatar', 'https://example.com/cdn/pic.png']);
+  assert.equal(seenUa, 'ag-vario');
+  assert.equal(imgRes.contentType, 'image/png');
+  assert.equal(imgRes.buffer.toString('utf8'), 'PNGDATA');
+
+  // 2. Redirect downgrading https -> http rejects
+  await assert.rejects(
+    httpsGetLimited('https://example.com/avatar', {
+      requireImage: true,
+      getFn: makeMockGet((_p, _o, _r, cb) => cb(makeRes(302, { location: 'http://insecure.example/a.png' })))
+    }),
+    /Only HTTPS URLs are permitted/
+  );
+
+  // 3. requireImage rejects non-image content-type
+  await assert.rejects(
+    httpsGetLimited('https://example.com/avatar', {
+      requireImage: true,
+      getFn: makeMockGet((_p, _o, _r, cb) => cb(makeRes(200, { 'content-type': 'text/html' }, [Buffer.from('<html/>')])))
+    }),
+    /Non-image content type/
+  );
+
+  // 4. Size limit destroys request and rejects
+  await assert.rejects(
+    httpsGetLimited('https://example.com/big', {
+      maxBytes: 4,
+      getFn: makeMockGet((_p, _o, _r, cb) => cb(makeRes(200, { 'content-type': 'text/plain' }, [Buffer.from('12345')])))
+    }),
+    /exceeds size limit/
+  );
+
+  // 5. Timeout triggers req.destroy and rejects
+  await assert.rejects(
+    httpsGetLimited('https://example.com/slow', {
+      timeoutMs: 50,
+      getFn: makeMockGet((_p, _o, req, _cb) => {
+        req._onTimeout();
+      })
+    }),
+    /Request timeout/
+  );
+});
+
+test('collector: resolveAvatarDataUrl never falls back to Gravatar', async () => {
+  const rootTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-vario-avatar-'));
+  const dataDir = path.join(rootTmp, 'data');
+  const stateDir = path.join(rootTmp, 'state');
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(stateDir, { recursive: true });
+
+  try {
+    const requestedUrls = [];
+    const col = createCollector({
+      dataDir,
+      stateDir,
+      pricingSyncEnabled: false,
+      fetchUrlFn: async (url) => {
+        requestedUrls.push(url);
+        throw new Error('fetch failed');
+      }
+    });
+
+    const noUrlRes = await col.resolveAvatarDataUrl({ email: 'pilot@example.com' });
+    assert.equal(noUrlRes, null);
+    assert.deepEqual(requestedUrls, []);
+
+    const failedUrlRes = await col.resolveAvatarDataUrl({
+      profilePictureUrl: 'https://example.com/missing.png',
+      email: 'pilot@example.com'
+    });
+    assert.equal(failedUrlRes, null);
+    assert.deepEqual(requestedUrls, ['https://example.com/missing.png']);
+  } finally {
     fs.rmSync(rootTmp, { recursive: true, force: true });
   }
 });

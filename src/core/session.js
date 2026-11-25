@@ -152,13 +152,23 @@ function hasModelHint(modelInput) {
   );
 }
 
-function pickFirstValidModel(calls = []) {
-  const normalized = (Array.isArray(calls) ? calls : []).map(normalizeCall).filter(Boolean);
+function pickFirstValidModelFromNormalized(normalized = []) {
   const firstValid = normalized.find((c) => isValidCall(c) && hasModelHint(c.modelInput));
   if (firstValid) return resolveModelIdentity(firstValid.modelInput);
   const firstAny = normalized.find((c) => hasModelHint(c.modelInput));
   if (firstAny) return resolveModelIdentity(firstAny.modelInput);
   return resolveModelIdentity(null);
+}
+
+function pickFirstValidModel(calls = []) {
+  let firstAnyModelInput = null;
+  for (const raw of Array.isArray(calls) ? calls : []) {
+    const c = normalizeCall(raw);
+    if (!c || !hasModelHint(c.modelInput)) continue;
+    if (isValidCall(c)) return resolveModelIdentity(c.modelInput);
+    if (!firstAnyModelInput) firstAnyModelInput = c.modelInput;
+  }
+  return resolveModelIdentity(firstAnyModelInput);
 }
 
 function normalizeSubagentStatus(summary = {}) {
@@ -298,7 +308,7 @@ function computeSessionStats(input = {}) {
     Number.isFinite(Number(input.contextLimit)) && Number(input.contextLimit) > 0
       ? Number(input.contextLimit)
       : callMaxContextTokens;
-  const primaryModel = pickFirstValidModel(rawCalls);
+  const primaryModel = pickFirstValidModelFromNormalized(normalized);
   const latestModel = latestValid ? resolveModelIdentity(latestValid.modelInput) : primaryModel;
   const cost = calculateSessionCost(validCalls, primaryModel);
   const compaction = computeCompactionInfo(validCalls, input.checkpointCount);

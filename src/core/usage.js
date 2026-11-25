@@ -61,6 +61,7 @@ function createEmptyDay(dateKey) {
 
 function computeUsageReport(sessions = [], { period = '7D', nowMs = Date.now(), selectedDateKey = null } = {}) {
   const normalizedSessions = [];
+  const sessionById = new Map();
   let earliestDateKey = null;
 
   for (const sess of sessions || []) {
@@ -81,7 +82,7 @@ function computeUsageReport(sessions = [], { period = '7D', nowMs = Date.now(), 
       ? sess.primaryModel
       : pickFirstValidModel(rawCalls);
 
-    normalizedSessions.push({
+    const normalizedEntry = {
       conversationId: sess.conversationId || '',
       rootConversationId: sess.rootConversationId || sess.conversationId || '',
       isChild: Boolean(sess.isChild),
@@ -89,7 +90,11 @@ function computeUsageReport(sessions = [], { period = '7D', nowMs = Date.now(), 
       lastModifiedMs: Number(sess.lastModifiedMs) || 0,
       primaryModel,
       calls: enrichedCalls
-    });
+    };
+    normalizedSessions.push(normalizedEntry);
+    if (normalizedEntry.conversationId && !sessionById.has(normalizedEntry.conversationId)) {
+      sessionById.set(normalizedEntry.conversationId, normalizedEntry);
+    }
   }
 
   const range = buildDateRange(period, nowMs, earliestDateKey);
@@ -242,7 +247,7 @@ function computeUsageReport(sessions = [], { period = '7D', nowMs = Date.now(), 
       if (!r.title || r.title === r.conversationId.slice(0, 8)) r.title = sess.title;
       r.primaryModel = model;
     } else if (sessInSelection && rootMap.has(sess.rootConversationId) && !rootMap.get(sess.rootConversationId).title) {
-      const mainMeta = normalizedSessions.find((s) => s.conversationId === sess.rootConversationId);
+      const mainMeta = sessionById.get(sess.rootConversationId);
       if (mainMeta) {
         rootMap.get(sess.rootConversationId).title = mainMeta.title;
         rootMap.get(sess.rootConversationId).primaryModel = mainMeta.primaryModel;

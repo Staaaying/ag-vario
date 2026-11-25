@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Loopback-only read-only RPC client for Antigravity v2.34.0 LanguageServerService.
+ * Loopback-only read-only RPC client for Antigravity 2.0 LanguageServerService.
  *
  * MIT Attribution: authBootstrap resolution, daemon/hub_*.json discovery, and
  * Connect-Protocol CSRF retry conventions reference `antigravity-context-viewer`

@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { performance } = require('node:perf_hooks');
 const { DatabaseSync } = require('node:sqlite');
 
 const { parseRawSummary, parseStepMetadata, parseGenMetadata } = require('../core/pb');
@@ -16,6 +17,14 @@ const {
 
 const DEFAULT_DATA_DIR = path.join(os.homedir(), '.gemini', 'antigravity');
 const CACHE_VERSION = 1;
+const CONVERSATION_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
+
+function resolveConversationDbPath(dataDir, conversationId) {
+  if (typeof conversationId !== 'string' || !CONVERSATION_ID_RE.test(conversationId)) {
+    return null;
+  }
+  return path.join(dataDir, 'conversations', `${conversationId}.db`);
+}
 
 function toSqliteFileUri(dbPath, immutable) {
   const abs = path.resolve(dbPath);
@@ -32,7 +41,7 @@ function hasActiveWal(dbPath) {
   const walPath = `${dbPath}-wal`;
   const shmPath = `${dbPath}-shm`;
   try {
-    if (!fs.existsSync(shmPath) || !fs.existsSync(walPath)) return false;
+    if (!fs.existsSync(shmPath)) return false;
     return fs.statSync(walPath).size > 0;
   } catch {
     return false;
@@ -41,11 +50,22 @@ function hasActiveWal(dbPath) {
 
 /**
  * Open a SQLite database strictly read-only in a WAL-safe manner.
+ * When -shm is absent, immutable=1 avoids creating a -shm file in ~/.gemini/antigravity/,
+ * intentionally trading off visibility of uncheckpointed -wal frames after an abnormal host exit.
  */
 function openReadOnlyDb(dbPath) {
   const immutable = !hasActiveWal(dbPath);
   const uri = toSqliteFileUri(dbPath, immutable);
-  return new DatabaseSync(uri, { open: true, readOnly: true });
+  const db = new DatabaseSync(uri, { open: true, readOnly: true });
+  if (!immutable) {
+    try {
+      db.exec('PRAGMA busy_timeout = 100');
+    } catch (err) {
+      db.close();
+      throw err;
+    }
+  }
+  return db;
 }
 
 function parseSqlTimestampMs(value) {
@@ -153,9 +173,30 @@ function readConversationSummaries(dataDir = DEFAULT_DATA_DIR) {
 /**
  * Read a single conversations/<id>.db file read-only.
  */
-function readConversationDb(dbPath, { includeContext = false, fallbackTimestampMs = null } = {}) {
+function readConversationDb(dbPath, { includeCalls = true, includeContext = false, fallbackTimestampMs = null } = {}) {
   const db = openReadOnlyDb(dbPath);
   try {
+    if (!includeCalls && !includeContext) {
+      const agg = db
+        .prepare(
+          `SELECT
+             SUM(CASE WHEN step_type = 14 THEN 1 ELSE 0 END) AS turns,
+             SUM(CASE WHEN step_type = 23 THEN 1 ELSE 0 END) AS checkpointCount,
+             SUM(CASE WHEN error_details IS NOT NULL AND length(error_details) > 0 THEN 1 ELSE 0 END) AS errorStepCount
+           FROM steps`
+        )
+        .get();
+      const lastRow = db.prepare('SELECT error_details FROM steps ORDER BY idx DESC LIMIT 1').get();
+      return {
+        turns: Number(agg?.turns) || 0,
+        checkpointCount: Number(agg?.checkpointCount) || 0,
+        errorStepCount: Number(agg?.errorStepCount) || 0,
+        lastStepHasError: Boolean(lastRow?.error_details && lastRow.error_details.length > 0),
+        calls: [],
+        contextChatModel: null
+      };
+    }
+
     const stepRows = db
       .prepare('SELECT idx, step_type, status, metadata, error_details FROM steps ORDER BY idx ASC')
       .all();
@@ -247,19 +288,36 @@ function readConversationDb(dbPath, { includeContext = false, fallbackTimestampM
   }
 }
 
-function getDbFingerprint(dbPath) {
+function getDbFingerprintInfo(dbPath) {
   const st = fs.statSync(dbPath);
   let walMtime = 0;
   let walSize = 0;
-  const walPath = `${dbPath}-wal`;
   try {
-    if (fs.existsSync(walPath)) {
-      const wst = fs.statSync(walPath);
+    const wst = fs.statSync(`${dbPath}-wal`, { throwIfNoEntry: false });
+    if (wst) {
       walMtime = wst.mtimeMs;
       walSize = wst.size;
     }
   } catch {}
-  return `${st.mtimeMs}:${st.size}:${walMtime}:${walSize}`;
+  return {
+    fingerprint: `${st.mtimeMs}:${st.size}:${walMtime}:${walSize}`,
+    mtimeMs: st.mtimeMs,
+    size: st.size,
+    walSize
+  };
+}
+
+function getDbFingerprint(dbPath) {
+  return getDbFingerprintInfo(dbPath).fingerprint;
+}
+
+function getSummaryDbFingerprint(dataDir = DEFAULT_DATA_DIR) {
+  const dbPath = path.join(dataDir, 'conversation_summaries.db');
+  try {
+    return getDbFingerprintInfo(dbPath).fingerprint;
+  } catch {
+    return null;
+  }
 }
 
 function loadCache(cachePath) {
@@ -278,100 +336,243 @@ function saveCacheAtomic(cachePath, cacheObj) {
   if (!cachePath) return;
   const dir = path.dirname(cachePath);
   fs.mkdirSync(dir, { recursive: true });
-  const tmpPath = `${cachePath}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmpPath, JSON.stringify(cacheObj), 'utf8');
-  fs.renameSync(tmpPath, cachePath);
+  const tmpPath = `${cachePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    fs.writeFileSync(tmpPath, JSON.stringify(cacheObj), 'utf8');
+    fs.renameSync(tmpPath, cachePath);
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch {}
+    throw err;
+  }
+}
+
+async function saveCacheAtomicAsync(cachePath, cacheObj) {
+  if (!cachePath) return;
+  const dir = path.dirname(cachePath);
+  await fs.promises.mkdir(dir, { recursive: true });
+  const tmpPath = `${cachePath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    await fs.promises.writeFile(tmpPath, JSON.stringify(cacheObj), 'utf8');
+    await fs.promises.rename(tmpPath, cachePath);
+  } catch (err) {
+    try {
+      await fs.promises.unlink(tmpPath);
+    } catch {}
+    throw err;
+  }
+}
+
+function scanSingleConversationFile({ file, convDir, summaries, cache, errors }) {
+  const id = file.slice(0, -3);
+  const dbPath = path.join(convDir, file);
+  const sum = summaries.byId.get(id);
+
+  let fpInfo;
+  try {
+    fpInfo = getDbFingerprintInfo(dbPath);
+  } catch (err) {
+    errors.push({ conversationId: id, error: err.message });
+    return { session: null, cacheHit: false, scanned: false, cacheDirty: false };
+  }
+
+  let dbData = null;
+  let cacheHit = false;
+  let scanned = false;
+  let cacheDirty = false;
+  const cached = cache.entries[id];
+  if (cached && cached.fingerprint === fpInfo.fingerprint) {
+    dbData = cached.data;
+    cacheHit = true;
+  } else {
+    try {
+      const fallbackTs = sum?.lastModifiedMs || fpInfo.mtimeMs;
+      dbData = readConversationDb(dbPath, { includeContext: false, fallbackTimestampMs: fallbackTs });
+      cache.entries[id] = { fingerprint: fpInfo.fingerprint, data: dbData };
+      cacheDirty = true;
+      scanned = true;
+    } catch (err) {
+      errors.push({ conversationId: id, error: err.message });
+      return { session: null, cacheHit: false, scanned: false, cacheDirty: false };
+    }
+  }
+
+  const calls = Array.isArray(dbData.calls) ? dbData.calls : [];
+  const primaryModel = calls.length > 0
+    ? pickFirstValidModel(calls)
+    : resolveModelIdentity(sum?.subagentModelNum ? { modelNum: sum.subagentModelNum } : null);
+
+  const session = {
+    conversationId: id,
+    kind: sum?.kind || 'main',
+    isChild: sum ? sum.isChild : false,
+    title: sum?.title || id.slice(0, 8),
+    role: sum?.role || '',
+    agentName: sum?.agentName || '',
+    parentConversationId: sum?.parentConversationId || '',
+    rootConversationId: sum?.rootConversationId || id,
+    status: sum?.status || '',
+    killed: sum?.killed || false,
+    normalizedStatus: normalizeSubagentStatus({
+      status: sum?.status,
+      killed: sum?.killed,
+      lastStepHasError: dbData.lastStepHasError
+    }),
+    lastModifiedMs: sum?.lastModifiedMs || fpInfo.mtimeMs,
+    turns: dbData.turns || 0,
+    errorStepCount: dbData.errorStepCount || 0,
+    lastStepHasError: Boolean(dbData.lastStepHasError),
+    primaryModel,
+    calls
+  };
+
+  return { session, cacheHit, scanned, cacheDirty };
+}
+
+function prepareScanContext({ dataDir, cachePath, summaries, cache }) {
+  const activeSummaries = summaries || readConversationSummaries(dataDir);
+  const convDir = path.join(dataDir, 'conversations');
+  const activeCache = cache || loadCache(cachePath);
+  const convDirExists = fs.existsSync(convDir);
+  const files = convDirExists
+    ? fs.readdirSync(convDir).filter((f) => f.endsWith('.db')).sort()
+    : [];
+  return { activeSummaries, convDir, convDirExists, activeCache, files };
+}
+
+function pruneStaleCacheEntries(cache, files, convDirExists) {
+  if (!convDirExists || !cache?.entries) return false;
+  const presentIds = new Set(files.map((f) => f.slice(0, -3)));
+  let pruned = false;
+  for (const id of Object.keys(cache.entries)) {
+    if (!presentIds.has(id)) {
+      delete cache.entries[id];
+      pruned = true;
+    }
+  }
+  return pruned;
 }
 
 /**
  * Incrementally scan conversations/*.db using mtime+size+wal fingerprints.
- * Pass cachePath = null for 100% disk-write-free dry-runs.
+ * Pass cachePath = null (or persist = false) for disk-write-free runs.
  */
-function scanConversationsIncremental({ dataDir = DEFAULT_DATA_DIR, cachePath = null } = {}) {
+function scanConversationsIncremental({
+  dataDir = DEFAULT_DATA_DIR,
+  cachePath = null,
+  summaries = null,
+  cache = null,
+  persist = true
+} = {}) {
   const startMs = Date.now();
-  const summaries = readConversationSummaries(dataDir);
-  const convDir = path.join(dataDir, 'conversations');
+  const { activeSummaries, convDir, convDirExists, activeCache, files } = prepareScanContext({
+    dataDir,
+    cachePath,
+    summaries,
+    cache
+  });
 
-  const cache = loadCache(cachePath);
-  let cacheDirty = false;
+  let cacheDirty = pruneStaleCacheEntries(activeCache, files, convDirExists);
   let cacheHits = 0;
   let scanned = 0;
   const errors = [];
-
-  const files = fs.existsSync(convDir)
-    ? fs.readdirSync(convDir).filter((f) => f.endsWith('.db')).sort()
-    : [];
-
   const sessions = [];
 
   for (const file of files) {
-    const id = file.slice(0, -3);
-    const dbPath = path.join(convDir, file);
-    const sum = summaries.byId.get(id);
-
-    let fp = null;
-    try {
-      fp = getDbFingerprint(dbPath);
-    } catch (err) {
-      errors.push({ conversationId: id, error: err.message });
-      continue;
-    }
-
-    let dbData = null;
-    const cached = cache.entries[id];
-    if (cached && cached.fingerprint === fp) {
-      dbData = cached.data;
-      cacheHits++;
-    } else {
-      try {
-        const fallbackTs = sum?.lastModifiedMs || fs.statSync(dbPath).mtimeMs;
-        dbData = readConversationDb(dbPath, { includeContext: false, fallbackTimestampMs: fallbackTs });
-        cache.entries[id] = { fingerprint: fp, data: dbData };
-        cacheDirty = true;
-        scanned++;
-      } catch (err) {
-        errors.push({ conversationId: id, error: err.message });
-        continue;
-      }
-    }
-
-    const calls = Array.isArray(dbData.calls) ? dbData.calls : [];
-    const primaryModel = calls.length > 0
-      ? pickFirstValidModel(calls)
-      : resolveModelIdentity(sum?.subagentModelNum ? { modelNum: sum.subagentModelNum } : null);
-
-    sessions.push({
-      conversationId: id,
-      kind: sum?.kind || 'main',
-      isChild: sum ? sum.isChild : false,
-      title: sum?.title || id.slice(0, 8),
-      role: sum?.role || '',
-      agentName: sum?.agentName || '',
-      parentConversationId: sum?.parentConversationId || '',
-      rootConversationId: sum?.rootConversationId || id,
-      status: sum?.status || '',
-      killed: sum?.killed || false,
-      normalizedStatus: normalizeSubagentStatus({
-        status: sum?.status,
-        killed: sum?.killed,
-        lastStepHasError: dbData.lastStepHasError
-      }),
-      lastModifiedMs: sum?.lastModifiedMs || fs.statSync(dbPath).mtimeMs,
-      turns: dbData.turns || 0,
-      errorStepCount: dbData.errorStepCount || 0,
-      lastStepHasError: Boolean(dbData.lastStepHasError),
-      primaryModel,
-      calls
+    const res = scanSingleConversationFile({
+      file,
+      convDir,
+      summaries: activeSummaries,
+      cache: activeCache,
+      errors
     });
+    if (res.cacheHit) cacheHits++;
+    if (res.scanned) scanned++;
+    if (res.cacheDirty) cacheDirty = true;
+    if (res.session) sessions.push(res.session);
   }
 
-  if (cachePath && cacheDirty) {
-    saveCacheAtomic(cachePath, cache);
+  if (persist && cachePath && cacheDirty) {
+    saveCacheAtomic(cachePath, activeCache);
   }
 
   return {
-    summaries,
+    summaries: activeSummaries,
     sessions,
+    cacheDirty,
+    stats: {
+      totalDbs: files.length,
+      cacheHits,
+      scanned,
+      errors,
+      elapsedMs: Date.now() - startMs
+    }
+  };
+}
+
+/**
+ * Time-sliced async incremental scan yielding via setImmediate so cold scans
+ * do not block the Electron main-process event loop.
+ */
+async function scanConversationsIncrementalAsync({
+  dataDir = DEFAULT_DATA_DIR,
+  cachePath = null,
+  summaries = null,
+  cache = null,
+  persist = true,
+  timeSliceMs = 12
+} = {}) {
+  const startMs = Date.now();
+  const { activeSummaries, convDir, convDirExists, activeCache, files } = prepareScanContext({
+    dataDir,
+    cachePath,
+    summaries,
+    cache
+  });
+
+  let cacheDirty = pruneStaleCacheEntries(activeCache, files, convDirExists);
+  let cacheHits = 0;
+  let scanned = 0;
+  const errors = [];
+  const sessions = [];
+  let sliceStart = performance.now();
+  let scannedInSlice = 0;
+  let processedInSlice = 0;
+
+  for (const file of files) {
+    const res = scanSingleConversationFile({
+      file,
+      convDir,
+      summaries: activeSummaries,
+      cache: activeCache,
+      errors
+    });
+    processedInSlice++;
+    if (res.cacheHit) cacheHits++;
+    if (res.scanned) {
+      scanned++;
+      scannedInSlice++;
+    }
+    if (res.cacheDirty) cacheDirty = true;
+    if (res.session) sessions.push(res.session);
+
+    if ((scannedInSlice > 0 || processedInSlice >= 16) && performance.now() - sliceStart >= timeSliceMs) {
+      await new Promise((r) => setImmediate(r));
+      sliceStart = performance.now();
+      scannedInSlice = 0;
+      processedInSlice = 0;
+    }
+  }
+
+  if (persist && cachePath && cacheDirty) {
+    await saveCacheAtomicAsync(cachePath, activeCache);
+  }
+
+  return {
+    summaries: activeSummaries,
+    sessions,
+    cacheDirty,
     stats: {
       totalDbs: files.length,
       cacheHits,
@@ -383,8 +584,8 @@ function scanConversationsIncremental({ dataDir = DEFAULT_DATA_DIR, cachePath = 
 }
 
 function readConversationContext(dataDir = DEFAULT_DATA_DIR, conversationId, { contextLimit = null } = {}) {
-  const dbPath = path.join(dataDir, 'conversations', `${conversationId}.db`);
-  if (!fs.existsSync(dbPath)) return null;
+  const dbPath = resolveConversationDbPath(dataDir, conversationId);
+  if (!dbPath || !fs.existsSync(dbPath)) return null;
   const detail = readConversationDb(dbPath, { includeContext: true });
   if (!detail.contextChatModel) return null;
   return computeContextBreakdown(detail.contextChatModel, { contextLimit });
@@ -392,13 +593,20 @@ function readConversationContext(dataDir = DEFAULT_DATA_DIR, conversationId, { c
 
 module.exports = {
   DEFAULT_DATA_DIR,
+  resolveConversationDbPath,
   toSqliteFileUri,
   hasActiveWal,
   openReadOnlyDb,
   parseSqlTimestampMs,
   readConversationSummaries,
   readConversationDb,
+  getDbFingerprintInfo,
   getDbFingerprint,
+  getSummaryDbFingerprint,
+  loadCache,
+  saveCacheAtomic,
+  saveCacheAtomicAsync,
   scanConversationsIncremental,
+  scanConversationsIncrementalAsync,
   readConversationContext
 };

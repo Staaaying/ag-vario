@@ -200,3 +200,21 @@ test('session: computeSessionStats tracks 0x, 1x, 3x compaction and checkpoint-o
   assert.equal(cpOnly.compaction.lastBeforeTokens, null);
   assert.equal(cpOnly.compaction.lastAfterTokens, null);
 });
+
+
+test('session: pickFirstValidModel short-circuits to first valid call and falls back cleanly', () => {
+  const model1 = session.pickFirstValidModel([
+    { inputTokens: 0, outputTokens: 0, modelDisplayName: 'Gemini 4 Carbon (Medium)' },
+    { inputTokens: 100, outputTokens: 20, modelDisplayName: 'Gemini 4 Hydrogen (High)' },
+    { inputTokens: 500, outputTokens: 50, modelDisplayName: 'Gemini 4 Neon (XHigh)' }
+  ]);
+  assert.equal(model1.modelKey, 'gemini-4-hydrogen');
+
+  const fallback = session.pickFirstValidModel([
+    { inputTokens: 0, outputTokens: 0, modelDisplayName: 'Gemini 4 Carbon (Medium)' },
+    { inputTokens: 0, outputTokens: 0, modelDisplayName: 'Gemini 4 Neon (XHigh)' }
+  ]);
+  assert.equal(fallback.modelKey, 'gemini-4-carbon');
+
+  assert.equal(session.pickFirstValidModel([]).modelKey, 'unknown');
+});

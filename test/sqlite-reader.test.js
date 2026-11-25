@@ -160,3 +160,121 @@ test('sqlite-reader: WAL-safe read-only summaries, incremental cache, and contex
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+
+test('sqlite-reader: includeCalls=false lightweight mode, empty steps, getDbFingerprintInfo, and async incremental scan', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-vario-sq-opt-'));
+  try {
+    const convDir = path.join(tmpDir, 'conversations');
+    fs.mkdirSync(convDir, { recursive: true });
+
+    const db1 = path.join(convDir, 'conv-1.db');
+    buildConversationFixture(db1, { wal: false, inputTokens: 1200 });
+
+    const fpInfo = reader.getDbFingerprintInfo(db1);
+    assert.equal(fpInfo.fingerprint, reader.getDbFingerprint(db1));
+    assert.ok(fpInfo.mtimeMs > 0);
+    assert.ok(fpInfo.size > 0);
+
+    const light = reader.readConversationDb(db1, { includeCalls: false, includeContext: false });
+    assert.equal(light.turns, 1);
+    assert.equal(light.checkpointCount, 1);
+    assert.equal(light.errorStepCount, 0);
+    assert.equal(light.lastStepHasError, false);
+    assert.deepEqual(light.calls, []);
+    assert.equal(light.contextChatModel, null);
+
+    // Empty steps table returns zeroed counts cleanly
+    const emptyDbPath = path.join(convDir, 'conv-empty.db');
+    const emptyDb = new DatabaseSync(emptyDbPath);
+    emptyDb.exec(`
+      CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, metadata BLOB, error_details BLOB);
+      CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER DEFAULT 0);
+    `);
+    emptyDb.close();
+    const emptyLight = reader.readConversationDb(emptyDbPath, { includeCalls: false });
+    assert.equal(emptyLight.turns, 0);
+    assert.equal(emptyLight.checkpointCount, 0);
+    assert.equal(emptyLight.errorStepCount, 0);
+    assert.equal(emptyLight.lastStepHasError, false);
+
+    // Async incremental scan with timeSliceMs=0 yields and persists atomically
+    const cachePath = path.join(tmpDir, 'async-cache.json');
+    const asyncRes1 = await reader.scanConversationsIncrementalAsync({
+      dataDir: tmpDir,
+      cachePath,
+      timeSliceMs: 0
+    });
+    assert.equal(asyncRes1.stats.totalDbs, 2);
+    assert.equal(asyncRes1.stats.scanned, 2);
+    assert.equal(asyncRes1.cacheDirty, true);
+    assert.ok(fs.existsSync(cachePath));
+
+    const asyncRes2 = await reader.scanConversationsIncrementalAsync({
+      dataDir: tmpDir,
+      cachePath,
+      timeSliceMs: 0
+    });
+    assert.equal(asyncRes2.stats.cacheHits, 2);
+    assert.equal(asyncRes2.stats.scanned, 0);
+    assert.equal(asyncRes2.cacheDirty, false);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('sqlite-reader: resolveConversationDbPath rejects traversal and readConversationContext returns null', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-vario-sq-sec-'));
+  try {
+    assert.equal(
+      reader.resolveConversationDbPath(tmpDir, '11111111-1111-1111-1111-111111111111'),
+      path.join(tmpDir, 'conversations', '11111111-1111-1111-1111-111111111111.db')
+    );
+    assert.equal(reader.resolveConversationDbPath(tmpDir, 'main-1'), path.join(tmpDir, 'conversations', 'main-1.db'));
+
+    for (const bad of ['../x', 'a/b', 'a\\b', '.', '..', '', null, undefined, 123, 'a'.repeat(129)]) {
+      assert.equal(reader.resolveConversationDbPath(tmpDir, bad), null);
+      assert.equal(reader.readConversationContext(tmpDir, bad), null);
+    }
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('sqlite-reader: sync and async incremental scans prune deleted conversation entries from cache', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-vario-sq-prune-'));
+  try {
+    const convDir = path.join(tmpDir, 'conversations');
+    fs.mkdirSync(convDir, { recursive: true });
+    buildConversationFixture(path.join(convDir, 'keep-1.db'), { inputTokens: 500 });
+    buildConversationFixture(path.join(convDir, 'drop-1.db'), { inputTokens: 600 });
+
+    const syncCachePath = path.join(tmpDir, 'sync-cache.json');
+    const asyncCachePath = path.join(tmpDir, 'async-cache.json');
+
+    reader.scanConversationsIncremental({ dataDir: tmpDir, cachePath: syncCachePath });
+    await reader.scanConversationsIncrementalAsync({ dataDir: tmpDir, cachePath: asyncCachePath, timeSliceMs: 0 });
+    assert.ok(reader.loadCache(syncCachePath).entries['drop-1']);
+    assert.ok(reader.loadCache(asyncCachePath).entries['drop-1']);
+
+    fs.unlinkSync(path.join(convDir, 'drop-1.db'));
+
+    const syncAfter = reader.scanConversationsIncremental({ dataDir: tmpDir, cachePath: syncCachePath });
+    assert.equal(syncAfter.cacheDirty, true);
+    assert.equal(syncAfter.sessions.length, 1);
+    assert.equal('drop-1' in reader.loadCache(syncCachePath).entries, false);
+    assert.ok(reader.loadCache(syncCachePath).entries['keep-1']);
+
+    const asyncAfter = await reader.scanConversationsIncrementalAsync({
+      dataDir: tmpDir,
+      cachePath: asyncCachePath,
+      timeSliceMs: 0
+    });
+    assert.equal(asyncAfter.cacheDirty, true);
+    assert.equal(asyncAfter.sessions.length, 1);
+    assert.equal('drop-1' in reader.loadCache(asyncCachePath).entries, false);
+    assert.ok(reader.loadCache(asyncCachePath).entries['keep-1']);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

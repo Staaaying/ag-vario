@@ -160,3 +160,52 @@ test('usage: 7D/30D/ALL summary, heatmap levels, By Model, Top 3 rollup, and day
   assert.equal(rAll.range.days, 15);
   assert.deepEqual(rAll.heatmap, r30.heatmap);
 });
+
+
+test('usage: resolves root title and primaryModel when child appears before parent on selectedDateKey', () => {
+  const nowMs = Date.parse('2026-11-24T15:00:00+08:00');
+  const sessions = [
+    {
+      conversationId: 'child-first',
+      rootConversationId: 'root-later',
+      isChild: true,
+      title: 'Subtask',
+      lastModifiedMs: nowMs,
+      calls: [
+        {
+          timestampMs: nowMs,
+          modelDisplayName: 'Gemini 4 Hydrogen (High)',
+          inputTokens: 10000,
+          outputTokens: 1000,
+          cacheReadTokens: 0
+        }
+      ]
+    },
+    {
+      conversationId: 'root-later',
+      rootConversationId: 'root-later',
+      isChild: false,
+      title: 'Parent Root Title',
+      lastModifiedMs: Date.parse('2026-11-20T10:00:00+08:00'),
+      calls: [
+        {
+          timestampMs: Date.parse('2026-11-20T10:00:00+08:00'),
+          modelDisplayName: 'Gemini 4 Neon (XHigh)',
+          inputTokens: 5000,
+          outputTokens: 500,
+          cacheReadTokens: 0
+        }
+      ]
+    }
+  ];
+
+  const report = usage.computeUsageReport(sessions, {
+    period: '7D',
+    nowMs,
+    selectedDateKey: '2026-11-24'
+  });
+  assert.equal(report.topSessions.length, 1);
+  assert.equal(report.topSessions[0].conversationId, 'root-later');
+  assert.equal(report.topSessions[0].title, 'Parent Root Title');
+  assert.equal(report.topSessions[0].primaryModel.modelKey, 'gemini-4-neon');
+});

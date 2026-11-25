@@ -25,8 +25,12 @@ const PRICING_CACHE_VERSION = 1;
 const AVATAR_POS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const AVATAR_NEG_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_AVATAR_BYTES = 256 * 1024;
+const MAX_CONV_DB_CACHE_ENTRIES = 128;
 
-function defaultFetchText(url, timeoutMs = 6000, redirectsLeft = 3) {
+function httpsGetLimited(
+  url,
+  { timeoutMs = 6000, maxBytes = MAX_PRICING_DOC_BYTES, redirectsLeft = 3, requireImage = false, getFn = https.get } = {}
+) {
   return new Promise((resolve, reject) => {
     let parsed;
     try {
@@ -36,84 +40,80 @@ function defaultFetchText(url, timeoutMs = 6000, redirectsLeft = 3) {
       return;
     }
     if (parsed.protocol !== 'https:') {
-      reject(new Error('Pricing sync only permits HTTPS'));
+      reject(new Error('Only HTTPS URLs are permitted'));
       return;
     }
-    const req = https.get(parsed, { timeout: timeoutMs, headers: { 'User-Agent': 'ag-vario/0.1' } }, (res) => {
+    let aborted = false;
+    const req = getFn(parsed, { timeout: timeoutMs, headers: { 'User-Agent': 'ag-vario' } }, (res) => {
       if (
         (res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) &&
-        res.headers.location &&
+        res.headers?.location &&
         redirectsLeft > 0
       ) {
-        const nextUrl = new URL(res.headers.location, parsed).toString();
-        res.resume();
-        resolve(defaultFetchText(nextUrl, timeoutMs, redirectsLeft - 1));
-        return;
-      }
-      if (res.statusCode !== 200) {
-        res.resume();
-        reject(new Error(`HTTP ${res.statusCode}`));
-        return;
-      }
-      const chunks = [];
-      let total = 0;
-      res.on('data', (chunk) => {
-        total += chunk.length;
-        if (total > MAX_PRICING_DOC_BYTES) {
-          req.destroy(new Error('Pricing doc exceeds size limit'));
+        let nextUrl;
+        try {
+          nextUrl = new URL(res.headers.location, parsed).toString();
+        } catch {
+          res.resume?.();
+          reject(new Error('Invalid redirect URL'));
           return;
         }
-        chunks.push(chunk);
-      });
-      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    });
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('Pricing fetch timeout')));
-    req.on('error', reject);
-  });
-}
-
-function defaultFetchImage(url, timeoutMs = 4000) {
-  return new Promise((resolve, reject) => {
-    let parsed;
-    try {
-      parsed = new URL(url);
-    } catch {
-      reject(new Error('Invalid URL'));
-      return;
-    }
-    if (parsed.protocol !== 'https:') {
-      reject(new Error('Avatar fetch only permits HTTPS'));
-      return;
-    }
-    const req = https.get(parsed, { timeout: timeoutMs }, (res) => {
+        res.resume?.();
+        resolve(
+          httpsGetLimited(nextUrl, {
+            timeoutMs,
+            maxBytes,
+            redirectsLeft: redirectsLeft - 1,
+            requireImage,
+            getFn
+          })
+        );
+        return;
+      }
       if (res.statusCode !== 200) {
-        res.resume();
+        res.resume?.();
         reject(new Error(`HTTP ${res.statusCode}`));
         return;
       }
-      const contentType = String(res.headers['content-type'] || 'image/png').split(';')[0].trim();
-      if (!contentType.startsWith('image/')) {
-        res.resume();
+      const contentType = String(res.headers?.['content-type'] || 'image/png').split(';')[0].trim();
+      if (requireImage && !contentType.startsWith('image/')) {
+        res.resume?.();
         reject(new Error('Non-image content type'));
         return;
       }
       const chunks = [];
       let total = 0;
       res.on('data', (chunk) => {
-        total += chunk.length;
-        if (total > MAX_AVATAR_BYTES) {
-          req.destroy(new Error('Avatar exceeds size limit'));
+        if (aborted) return;
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        total += buf.length;
+        if (total > maxBytes) {
+          aborted = true;
+          req.destroy(new Error('Response exceeds size limit'));
           return;
         }
-        chunks.push(chunk);
+        chunks.push(buf);
       });
       res.on('end', () => {
-        resolve({ contentType, buffer: Buffer.concat(chunks) });
+        if (aborted) return;
+        const buffer = Buffer.concat(chunks);
+        resolve(requireImage ? { contentType, buffer } : buffer.toString('utf8'));
       });
     });
-    req.setTimeout(timeoutMs, () => req.destroy(new Error('Avatar fetch timeout')));
+    req.setTimeout(timeoutMs, () => {
+      aborted = true;
+      req.destroy(new Error('Request timeout'));
+    });
     req.on('error', reject);
   });
+}
+
+function defaultFetchText(url, timeoutMs = 6000, redirectsLeft = 3) {
+  return httpsGetLimited(url, { timeoutMs, maxBytes: MAX_PRICING_DOC_BYTES, redirectsLeft, requireImage: false });
+}
+
+function defaultFetchImage(url, timeoutMs = 4000, redirectsLeft = 3) {
+  return httpsGetLimited(url, { timeoutMs, maxBytes: MAX_AVATAR_BYTES, redirectsLeft, requireImage: true });
 }
 
 function readCustomAvatar(stateDir) {
@@ -134,13 +134,6 @@ function readCustomAvatar(stateDir) {
     } catch {}
   }
   return null;
-}
-
-function writeJsonAtomic(filePath, obj) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-  fs.writeFileSync(tmp, JSON.stringify(obj), 'utf8');
-  fs.renameSync(tmp, filePath);
 }
 
 function extractChatModelCalls(generatorMetadata = []) {
@@ -206,6 +199,63 @@ function createCollector(options = {}) {
   let latestProfile = null;
   let cachedClientModelConfigs = [];
   let usageScanCache = null;
+  let summariesCache = null;
+  const convDbCache = new Map();
+  const usageCachePath = path.join(stateDir, 'conversations-cache-v1.json');
+  let usageMemoryCache = null;
+  let usageScanInFlight = null;
+  let usagePersistChain = Promise.resolve();
+  let usageCachePendingPersist = false;
+
+  function getCachedSummaries() {
+    const fp = sqliteReader.getSummaryDbFingerprint(dataDir);
+    if (summariesCache && summariesCache.fingerprint === fp) {
+      return summariesCache.data;
+    }
+    const data = sqliteReader.readConversationSummaries(dataDir);
+    summariesCache = { fingerprint: fp, data };
+    return data;
+  }
+
+  function readConversationDbCached(dbPath, { includeCalls = true } = {}) {
+    let fp;
+    try {
+      fp = sqliteReader.getDbFingerprint(dbPath);
+    } catch {
+      convDbCache.delete(dbPath);
+      return null;
+    }
+
+    let entry = convDbCache.get(dbPath);
+    if (entry && entry.fingerprint === fp) {
+      convDbCache.delete(dbPath);
+      convDbCache.set(dbPath, entry);
+      if (includeCalls) {
+        if (entry.full) return entry.full;
+      } else if (entry.full || entry.stepsOnly) {
+        return entry.full || entry.stepsOnly;
+      }
+    } else {
+      convDbCache.delete(dbPath);
+      entry = { fingerprint: fp, stepsOnly: null, full: null };
+    }
+
+    const dbRes = sqliteReader.readConversationDb(dbPath, { includeCalls, includeContext: false });
+    if (includeCalls) {
+      entry.full = dbRes;
+      entry.stepsOnly = null;
+    } else {
+      entry.stepsOnly = dbRes;
+    }
+
+    convDbCache.delete(dbPath);
+    convDbCache.set(dbPath, entry);
+    if (convDbCache.size > MAX_CONV_DB_CACHE_ENTRIES) {
+      const oldestKey = convDbCache.keys().next().value;
+      if (oldestKey !== undefined) convDbCache.delete(oldestKey);
+    }
+    return dbRes;
+  }
 
   const pricingCachePath = path.join(stateDir, 'pricing-cache-v1.json');
   let pricingState = {
@@ -298,7 +348,7 @@ function createCollector(options = {}) {
         models: merged.models
       };
       try {
-        writeJsonAtomic(pricingCachePath, {
+        sqliteReader.saveCacheAtomic(pricingCachePath, {
           version: PRICING_CACHE_VERSION,
           fetchedAtMs: nowMs,
           sources,
@@ -339,11 +389,10 @@ function createCollector(options = {}) {
     return rpcClientsByOrigin.get(norm);
   }
 
-  async function resolveAvatarDataUrl({ profilePictureUrl = null, email = '' } = {}) {
+  async function resolveAvatarDataUrl({ profilePictureUrl = null } = {}) {
     const custom = readCustomAvatar(stateDir);
     if (custom) return custom;
 
-    const cleanEmail = String(email || '').trim().toLowerCase();
     const cleanUrl = String(profilePictureUrl || '').trim();
     if (
       /^data:image\/(?:png|jpeg|jpg|webp|gif);base64,/i.test(cleanUrl) &&
@@ -351,11 +400,10 @@ function createCollector(options = {}) {
     ) {
       return cleanUrl;
     }
-    const cacheKeySource = cleanUrl || (cleanEmail ? `gravatar:${cleanEmail}` : '');
-    if (!cacheKeySource) return null;
+    if (!cleanUrl.startsWith('https://')) return null;
 
     const nowMs = nowFn();
-    const hash = crypto.createHash('sha256').update(cacheKeySource).digest('hex');
+    const hash = crypto.createHash('sha256').update(cleanUrl).digest('hex');
     const cacheFile = path.join(stateDir, 'avatars', `${hash}.json`);
 
     try {
@@ -367,29 +415,20 @@ function createCollector(options = {}) {
       }
     } catch {}
 
-    const tryUrls = [];
-    if (cleanUrl.startsWith('https://')) tryUrls.push(cleanUrl);
-    if (cleanEmail) {
-      const md5 = crypto.createHash('md5').update(cleanEmail).digest('hex');
-      tryUrls.push(`https://www.gravatar.com/avatar/${md5}?d=404&s=96`);
-    }
-
-    for (const targetUrl of tryUrls) {
-      try {
-        const res = await fetchUrlFn(targetUrl);
-        if (res && res.buffer && res.buffer.length > 0) {
-          const mime = res.contentType || 'image/png';
-          const dataUrl = `data:${mime};base64,${res.buffer.toString('base64')}`;
-          try {
-            writeJsonAtomic(cacheFile, { dataUrl, fetchedAtMs: nowMs });
-          } catch {}
-          return dataUrl;
-        }
-      } catch {}
-    }
+    try {
+      const res = await fetchUrlFn(cleanUrl);
+      if (res && res.buffer && res.buffer.length > 0) {
+        const mime = res.contentType || 'image/png';
+        const dataUrl = `data:${mime};base64,${res.buffer.toString('base64')}`;
+        try {
+          sqliteReader.saveCacheAtomic(cacheFile, { dataUrl, fetchedAtMs: nowMs });
+        } catch {}
+        return dataUrl;
+      }
+    } catch {}
 
     try {
-      writeJsonAtomic(cacheFile, { dataUrl: null, fetchedAtMs: nowMs });
+      sqliteReader.saveCacheAtomic(cacheFile, { dataUrl: null, fetchedAtMs: nowMs });
     } catch {}
     return null;
   }
@@ -454,8 +493,7 @@ function createCollector(options = {}) {
     let avatarDataUrl = existing?.avatarDataUrl || null;
     try {
       avatarDataUrl = await resolveAvatarDataUrl({
-        profilePictureUrl: snap.profile.profilePictureUrl,
-        email: snap.profile.email
+        profilePictureUrl: snap.profile.profilePictureUrl
       });
     } catch {}
     snap.profile.avatarDataUrl = avatarDataUrl;
@@ -472,7 +510,7 @@ function createCollector(options = {}) {
   }
 
   async function loadCallsForConversation(origin, conversationId, { includeMessages = false } = {}) {
-    const dbPath = path.join(dataDir, 'conversations', `${conversationId}.db`);
+    const dbPath = sqliteReader.resolveConversationDbPath(dataDir, conversationId);
     let calls = null;
     let turns = null;
     let checkpointCount = null;
@@ -491,15 +529,17 @@ function createCollector(options = {}) {
       } catch {}
     }
 
-    if (fs.existsSync(dbPath)) {
+    if (dbPath) {
       try {
-        const dbRes = sqliteReader.readConversationDb(dbPath, { includeContext: false });
-        turns = dbRes.turns;
-        checkpointCount = dbRes.checkpointCount || 0;
-        lastStepHasError = dbRes.lastStepHasError;
-        if (!calls) {
-          calls = dbRes.calls;
-          source = 'sqlite';
+        const dbRes = readConversationDbCached(dbPath, { includeCalls: !calls });
+        if (dbRes) {
+          turns = dbRes.turns;
+          checkpointCount = dbRes.checkpointCount || 0;
+          lastStepHasError = dbRes.lastStepHasError;
+          if (!calls) {
+            calls = dbRes.calls;
+            source = 'sqlite';
+          }
         }
       } catch {}
     }
@@ -527,12 +567,15 @@ function createCollector(options = {}) {
     if (!conversationId) {
       return { ok: false, error: 'Missing conversationId' };
     }
+    if (!sqliteReader.resolveConversationDbPath(dataDir, conversationId)) {
+      return { ok: false, error: 'Invalid conversationId' };
+    }
 
-    const summaries = sqliteReader.readConversationSummaries(dataDir);
+    const summaries = getCachedSummaries();
     const meta = summaries.byId.get(conversationId);
     const mainData = await loadCallsForConversation(origin, conversationId, { includeMessages: false });
 
-    const preStats = session.computeSessionStats({
+    const mainStats = session.computeSessionStats({
       conversationId,
       title: meta?.title || conversationId.slice(0, 8),
       turns: mainData.turns,
@@ -541,59 +584,49 @@ function createCollector(options = {}) {
       contextLimit: null
     });
     const resolvedLimit = resolveContextLimit(
-      preStats.latestModel || preStats.primaryModel,
+      mainStats.latestModel || mainStats.primaryModel,
       contextLimitHint,
-      preStats.waterline?.contextLimit
+      mainStats.waterline?.contextLimit
     );
-    const mainStats = resolvedLimit
-      ? session.computeSessionStats({
-          conversationId,
-          title: meta?.title || conversationId.slice(0, 8),
-          turns: mainData.turns,
-          checkpointCount: mainData.checkpointCount,
-          calls: mainData.calls,
-          contextLimit: resolvedLimit
-        })
-      : preStats;
+    if (resolvedLimit && resolvedLimit !== mainStats.waterline?.contextLimit) {
+      mainStats.waterline = context.computeContextWaterline(mainStats.currentContextTokens, resolvedLimit);
+    }
 
     const children = summaries.childrenByRoot.get(conversationId) || [];
     const childStatsList = [];
     for (const childMeta of children) {
       const childId = childMeta.conversationId;
-      const dbPath = path.join(dataDir, 'conversations', `${childId}.db`);
+      const dbPath = sqliteReader.resolveConversationDbPath(dataDir, childId);
       let childCalls = [];
       let childLastErr = false;
 
-      if (childMeta.normalizedStatus === 'Running' && origin) {
+      if (dbPath && childMeta.normalizedStatus === 'Running' && origin) {
         const loaded = await loadCallsForConversation(origin, childId, { includeMessages: false });
         childCalls = loaded.calls;
         childLastErr = loaded.lastStepHasError;
-      } else if (fs.existsSync(dbPath)) {
+      } else if (dbPath) {
         try {
-          const dbRes = sqliteReader.readConversationDb(dbPath, { includeContext: false });
-          childCalls = dbRes.calls;
-          childLastErr = dbRes.lastStepHasError;
+          const dbRes = readConversationDbCached(dbPath, { includeCalls: true });
+          if (dbRes) {
+            childCalls = dbRes.calls;
+            childLastErr = dbRes.lastStepHasError;
+          }
         } catch {}
       }
 
-      const preChild = session.computeSessionStats({
+      const childStats = session.computeSessionStats({
         conversationId: childId,
         title: childMeta.title,
         calls: childCalls
       });
       const childLimit = resolveContextLimit(
-        preChild.latestModel || preChild.primaryModel,
+        childStats.latestModel || childStats.primaryModel,
         contextLimitHint,
-        preChild.waterline?.contextLimit
+        childStats.waterline?.contextLimit
       );
-      const childStats = childLimit
-        ? session.computeSessionStats({
-            conversationId: childId,
-            title: childMeta.title,
-            calls: childCalls,
-            contextLimit: childLimit
-          })
-        : preChild;
+      if (childLimit && childLimit !== childStats.waterline?.contextLimit) {
+        childStats.waterline = context.computeContextWaterline(childStats.currentContextTokens, childLimit);
+      }
 
       childStatsList.push({
         ...childStats,
@@ -622,6 +655,10 @@ function createCollector(options = {}) {
     if (!conversationId) {
       return { ok: false, error: 'Missing conversationId' };
     }
+    const dbPath = sqliteReader.resolveConversationDbPath(dataDir, conversationId);
+    if (!dbPath) {
+      return { ok: false, error: 'Invalid conversationId' };
+    }
 
     let chatModel = null;
     let source = 'rpc';
@@ -647,7 +684,6 @@ function createCollector(options = {}) {
     }
 
     if (!chatModel || !hasContextSectionsOrTools(chatModel)) {
-      const dbPath = path.join(dataDir, 'conversations', `${conversationId}.db`);
       if (fs.existsSync(dbPath)) {
         try {
           const detail = sqliteReader.readConversationDb(dbPath, { includeContext: true });
@@ -677,20 +713,53 @@ function createCollector(options = {}) {
     };
   }
 
-  function ensureUsageScan(force = false) {
+  function persistUsageCacheSerialized(cacheObj) {
+    usagePersistChain = usagePersistChain
+      .catch(() => {})
+      .then(() => sqliteReader.saveCacheAtomicAsync(usageCachePath, cacheObj));
+    return usagePersistChain;
+  }
+
+  async function ensureUsageScan(force = false) {
     const nowMs = nowFn();
     if (!force && usageScanCache && nowMs - usageScanCache.scannedAtMs < usageScanThrottleMs) {
       return usageScanCache.scan;
     }
-    const cachePath = path.join(stateDir, 'conversations-cache-v1.json');
-    const scan = sqliteReader.scanConversationsIncremental({ dataDir, cachePath });
-    usageScanCache = { scannedAtMs: nowMs, scan };
-    return scan;
+    if (usageScanInFlight) {
+      return usageScanInFlight;
+    }
+    usageScanInFlight = (async () => {
+      if (!usageMemoryCache) {
+        usageMemoryCache = sqliteReader.loadCache(usageCachePath);
+      }
+      const summaries = getCachedSummaries();
+      const scan = await sqliteReader.scanConversationsIncrementalAsync({
+        dataDir,
+        cachePath: null,
+        summaries,
+        cache: usageMemoryCache,
+        persist: false
+      });
+      if (scan.cacheDirty) {
+        usageCachePendingPersist = true;
+      }
+      if (usageCachePendingPersist) {
+        try {
+          await persistUsageCacheSerialized(usageMemoryCache);
+          usageCachePendingPersist = false;
+        } catch {}
+      }
+      usageScanCache = { scannedAtMs: nowFn(), scan };
+      return scan;
+    })().finally(() => {
+      usageScanInFlight = null;
+    });
+    return usageScanInFlight;
   }
 
   async function getUsageReport({ period = '7D', selectedDateKey = null, force = false } = {}) {
     maybeRefreshPricing();
-    const scan = ensureUsageScan(force);
+    const scan = await ensureUsageScan(force);
     const report = usage.computeUsageReport(scan.sessions, {
       period,
       nowMs: nowFn(),
@@ -705,7 +774,7 @@ function createCollector(options = {}) {
   }
 
   async function getTodayUsageSummary({ force = false } = {}) {
-    const scan = ensureUsageScan(force);
+    const scan = await ensureUsageScan(force);
     const report = usage.computeUsageReport(scan.sessions, {
       period: '7D',
       nowMs: nowFn()
@@ -729,5 +798,6 @@ function createCollector(options = {}) {
 
 module.exports = {
   DEFAULT_STATE_DIR,
+  httpsGetLimited,
   createCollector
 };
