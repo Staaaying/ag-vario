@@ -25,11 +25,11 @@
       Error: '#e06c6c'
     },
     heatmapRamp: [
-      'rgba(255, 255, 255, 0.08)',
-      'rgba(125, 184, 232, 0.28)',
-      'rgba(125, 184, 232, 0.50)',
-      'rgba(125, 184, 232, 0.74)',
-      '#7db8e8'
+      '#343944',
+      '#1b466e',
+      '#2c70ad',
+      '#52a3e8',
+      '#b5dcff'
     ]
   };
 
@@ -779,17 +779,17 @@
     }
     .agv-dots {
       display: grid;
-      grid-template-columns: repeat(30, 8px);
+      grid-template-columns: repeat(30, 10px);
       justify-content: space-between;
       align-items: center;
     }
     .agv-heat-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
+      width: 10px;
+      height: 10px;
+      border-radius: 2.5px;
       transition: transform 100ms ease, box-shadow 100ms ease;
     }
-    .agv-heat-dot:hover { transform: scale(1.25); }
+    .agv-heat-dot:hover { transform: scale(1.18); }
     .agv-heat-dot[data-selected="true"] {
       box-shadow: 0 0 0 1.5px #fff;
     }

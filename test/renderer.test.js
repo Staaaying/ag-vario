@@ -574,6 +574,10 @@ test('renderer: Shadow isolation, Area A & B click popovers, on-demand Context, 
   assert.ok(usageHtml.includes('30 Days'));
   assert.ok(usageHtml.includes('All'));
   assert.ok(usageHtml.includes('Est. Cost'));
+  assert.ok(usageHtml.includes('Model Breakdown'));
+  assert.ok(usageHtml.includes('Est. Cost (USD)'));
+  assert.equal(usageHtml.includes('By Model'), false);
+  assert.equal(usageHtml.includes('>Est. USD<'), false);
   assert.ok(usageHtml.includes('Daily Avg'));
   assert.ok(usageHtml.includes('Per Chat'));
   assert.ok(usageHtml.includes('Daily Time'));
@@ -1209,7 +1213,10 @@ test('topbar: Usage panel renders full plan badge, clamps at 420px width, and us
     assert.ok(pop.innerHTML.includes('>Ultra<'));
     assert.equal(pop.innerHTML.includes('Google AI Ultra (5x)'), false);
 
-    // CSS assertions for no-wrap badge, 420px usage panel, Q3 quota meta, and U1 usage meta
+    // CSS assertions for no-wrap badge, 420px usage panel, Q3 quota meta, U1 usage meta, and 10x10 heatmap
+    assert.deepEqual(styles.COLORS.heatmapRamp, ['#343944', '#1b466e', '#2c70ad', '#52a3e8', '#b5dcff']);
+    assert.ok(styles.TOPBAR_CSS.includes('repeat(30, 10px)'));
+    assert.match(styles.TOPBAR_CSS, /\.agv-heat-dot\s*\{[^}]*width:\s*10px;[^}]*height:\s*10px;[^}]*border-radius:\s*2\.5px;/s);
     assert.match(styles.SHARED_CSS, /\.agv-badge\s*\{[^}]*white-space:\s*nowrap;[^}]*flex-shrink:\s*0;/s);
     assert.match(styles.TOPBAR_CSS, /\.agv-usage-panel\s*\{[^}]*width:\s*420px;/s);
     assert.match(styles.TOPBAR_CSS, /\.agv-quota-meta\s*\{[^}]*display:\s*inline-flex;[^}]*white-space:\s*nowrap;/s);

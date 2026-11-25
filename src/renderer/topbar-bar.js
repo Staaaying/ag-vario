@@ -344,7 +344,7 @@
             <div class="agv-dots">${dotsHtml}</div>
           </div>
           <div class="agv-block">
-            <div class="agv-sec-head"><span>By Model</span><span style="display:inline-flex;align-items:center;gap:5px;">${dayFilterPill}<span class="agv-est-tag">Est. USD</span></span></div>
+            <div class="agv-sec-head"><span>Model Breakdown</span><span style="display:inline-flex;align-items:center;gap:5px;">${dayFilterPill}<span class="agv-est-tag">Est. Cost (USD)</span></span></div>
             <div class="agv-model-list">${modelsHtml}</div>
           </div>
           <div class="agv-block">
