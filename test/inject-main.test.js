@@ -105,3 +105,108 @@ test('inject-main: buildRendererBundle compiles cleanly with vm.Script', () => {
   assert.ok(script);
   assert.ok(injectMain.PRELOAD_BRIDGE_SNIPPET.includes('agVarioAPI'));
 });
+
+
+test('inject-main: buildRendererBundle caches default dir and bypasses cache for custom rendererDir', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+
+  // Warm default cache
+  const first = injectMain.buildRendererBundle();
+  const origRead = fs.readFileSync;
+  let reads = 0;
+  fs.readFileSync = function (...args) {
+    reads++;
+    return origRead.apply(this, args);
+  };
+  try {
+    const second = injectMain.buildRendererBundle();
+    assert.equal(second, first);
+    assert.equal(reads, 0);
+
+    const customDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-vario-rnd-'));
+    try {
+      for (const f of injectMain.RENDERER_FILES) {
+        fs.writeFileSync(path.join(customDir, f), `/* custom ${f} */`, 'utf8');
+      }
+      const customBundle = injectMain.buildRendererBundle({ rendererDir: customDir });
+      assert.equal(reads, injectMain.RENDERER_FILES.length);
+      assert.ok(customBundle.includes('/* custom mount.js */'));
+    } finally {
+      fs.rmSync(customDir, { recursive: true, force: true });
+    }
+  } finally {
+    fs.readFileSync = origRead;
+  }
+});
+
+test('inject-main: ensureInjected coalesces concurrent calls, skips when alive, and installAgVario avoids double injection', async () => {
+  const { EventEmitter } = require('node:events');
+
+  function makeFakeWin() {
+    const wc = new EventEmitter();
+    wc.isDestroyed = () => false;
+    wc.getURL = () => 'https://127.0.0.1:43000/c/11111111-1111-1111-1111-111111111111';
+    const scripts = [];
+    let alive = false;
+    let releaseCheck;
+    let pauseFirstCheck = false;
+    wc.executeJavaScript = async (code) => {
+      scripts.push(code);
+      if (code.includes('isAlive()')) {
+        if (pauseFirstCheck) {
+          pauseFirstCheck = false;
+          await new Promise((r) => {
+            releaseCheck = r;
+          });
+        }
+        return alive;
+      }
+      alive = true;
+      return true;
+    };
+    const win = new EventEmitter();
+    win.isDestroyed = () => false;
+    win.webContents = wc;
+    return {
+      win,
+      wc,
+      scripts,
+      pauseNextAliveCheck: () => {
+        pauseFirstCheck = true;
+      },
+      releaseAliveCheck: () => releaseCheck?.(),
+      bundleExecCount: () => scripts.filter((s) => !s.includes('isAlive()')).length
+    };
+  }
+
+  // 1. Concurrent non-forced ensureInjected calls coalesce via inFlightByWc
+  const fake1 = makeFakeWin();
+  fake1.pauseNextAliveCheck();
+  const p1 = injectMain.ensureInjected(fake1.win, { force: false });
+  const p2 = injectMain.ensureInjected(fake1.win, { force: false });
+  await new Promise((r) => setTimeout(r, 5));
+  fake1.releaseAliveCheck();
+  const [r1, r2] = await Promise.all([p1, p2]);
+  assert.equal(r1, true);
+  assert.equal(r2, true);
+  assert.equal(fake1.bundleExecCount(), 1);
+
+  // 2. Subsequent non-forced call sees isAlive() === true and skips bundle execution
+  const r3 = await injectMain.ensureInjected(fake1.win, { force: false });
+  assert.equal(r3, true);
+  assert.equal(fake1.bundleExecCount(), 1);
+
+  // 3. installAgVario handles dom-ready followed by did-finish-load without double-injecting
+  const fake2 = makeFakeWin();
+  const fakeIpcMain = { handle() {} };
+  injectMain.installAgVario(fake2.win, { ipcMain: fakeIpcMain, collector: {} });
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(fake2.bundleExecCount(), 1);
+
+  fake2.wc.emit('dom-ready');
+  fake2.wc.emit('did-finish-load');
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(fake2.bundleExecCount(), 1);
+});

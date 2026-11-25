@@ -21,7 +21,7 @@
   'use strict';
 
   /**
-   * Dual-zone DOM mounter for Antigravity v2.34.0.
+   * Dual-zone DOM mounter for Antigravity 2.0.
    *
    * MIT Attribution: Split-pane URL UUID extraction and titlebar/model-selector
    * anchor conventions reference `antigravity-context-viewer`
@@ -234,6 +234,9 @@
     let activeModelHint = null;
     let lastCheckedHref = win?.location?.href || '';
     let interactionSyncTimer = null;
+    let interactionMicrotaskQueued = false;
+    let resizeRafId = null;
+    let resizeFallbackTimer = null;
     let sessionTick = 0;
     let currentTheme = styles.detectHostTheme(doc, win);
 
@@ -538,9 +541,13 @@
 
     function scheduleInteractionSync() {
       if (disposed) return;
-      Promise.resolve().then(() => {
-        if (!disposed) handleLocationOrFocusChange();
-      });
+      if (!interactionMicrotaskQueued) {
+        interactionMicrotaskQueued = true;
+        Promise.resolve().then(() => {
+          interactionMicrotaskQueued = false;
+          if (!disposed) handleLocationOrFocusChange();
+        });
+      }
       if (interactionSyncTimer) clearTimeout(interactionSyncTimer);
       interactionSyncTimer = setTimeout(() => {
         interactionSyncTimer = null;
@@ -549,10 +556,6 @@
     }
 
     function scheduleNavSync() {
-      if (disposed) return;
-      Promise.resolve().then(() => {
-        if (!disposed) handleLocationOrFocusChange();
-      });
       scheduleInteractionSync();
     }
 
@@ -588,7 +591,20 @@
       void refreshToday();
     };
     const onResize = () => {
-      if (!disposed) syncAll();
+      if (disposed) return;
+      if (typeof win?.requestAnimationFrame === 'function') {
+        if (resizeRafId !== null) return;
+        resizeRafId = win.requestAnimationFrame(() => {
+          resizeRafId = null;
+          if (!disposed) syncAll();
+        });
+      } else {
+        if (resizeFallbackTimer !== null) return;
+        resizeFallbackTimer = setTimeout(() => {
+          resizeFallbackTimer = null;
+          if (!disposed) syncAll();
+        }, 16);
+      }
     };
 
     let themeObserver = null;
@@ -687,6 +703,16 @@
       if (interactionSyncTimer) {
         clearTimeout(interactionSyncTimer);
         interactionSyncTimer = null;
+      }
+      if (resizeRafId !== null) {
+        try {
+          win?.cancelAnimationFrame?.(resizeRafId);
+        } catch {}
+        resizeRafId = null;
+      }
+      if (resizeFallbackTimer !== null) {
+        clearTimeout(resizeFallbackTimer);
+        resizeFallbackTimer = null;
       }
       if (themeObserver) {
         try {

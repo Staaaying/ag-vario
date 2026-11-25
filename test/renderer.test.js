@@ -1745,3 +1745,90 @@ test('split-pane & Top Layer: pane-bounded left alignment, narrow pane fallback,
     standalone.dispose();
   }
 });
+
+
+test('mount: coalesces resize via requestAnimationFrame, cancels on dispose, and deduplicates nav microtasks', async () => {
+  const { win, doc } = createFakeDom('https://127.0.0.1:43000/');
+  const winListeners = new Map();
+  const navListeners = new Map();
+  const rafQueue = new Map();
+  let rafSeq = 1;
+  let cancelledIds = [];
+
+  win.addEventListener = (t, fn) => {
+    const arr = winListeners.get(t) || [];
+    arr.push(fn);
+    winListeners.set(t, arr);
+  };
+  win.removeEventListener = (t, fn) => {
+    winListeners.set(t, (winListeners.get(t) || []).filter((f) => f !== fn));
+  };
+  win.requestAnimationFrame = (fn) => {
+    const id = rafSeq++;
+    rafQueue.set(id, fn);
+    return id;
+  };
+  win.cancelAnimationFrame = (id) => {
+    cancelledIds.push(id);
+    rafQueue.delete(id);
+  };
+  win.navigation = {
+    addEventListener(t, fn) {
+      const arr = navListeners.get(t) || [];
+      arr.push(fn);
+      navListeners.set(t, arr);
+    },
+    removeEventListener(t, fn) {
+      navListeners.set(t, (navListeners.get(t) || []).filter((f) => f !== fn));
+    }
+  };
+
+  let queryAllCalls = 0;
+  const origQueryAll = doc.querySelectorAll.bind(doc);
+  doc.querySelectorAll = (sel) => {
+    queryAllCalls++;
+    return origQueryAll(sel);
+  };
+
+  const ctrl = mount.start({
+    win,
+    doc,
+    api: {
+      getQuota: async () => ({ ok: false }),
+      getToday: async () => ({ ok: true, data: { totalTokens: 0 } }),
+      getSession: async () => ({ ok: false })
+    }
+  });
+
+  try {
+    // 1. Multiple resize events in one frame coalesce into a single syncAll
+    queryAllCalls = 0;
+    for (let i = 0; i < 10; i++) {
+      for (const fn of winListeners.get('resize') || []) fn();
+    }
+    assert.equal(queryAllCalls, 0);
+    assert.equal(rafQueue.size, 1);
+    const [pendingId, pendingFn] = rafQueue.entries().next().value;
+    rafQueue.delete(pendingId);
+    pendingFn(16);
+    assert.equal(queryAllCalls, 1);
+
+    // 2. Navigation currententrychange runs only 1 syncAll in microtask (not 2)
+    queryAllCalls = 0;
+    win.location.href = 'https://127.0.0.1:43000/c/55555555-5555-5555-5555-555555555555';
+    for (const fn of navListeners.get('currententrychange') || []) fn();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(queryAllCalls, 1);
+
+    // 3. Pending rAF resize callback is cancelled on dispose()
+    for (const fn of winListeners.get('resize') || []) fn();
+    assert.equal(rafQueue.size, 1);
+    const queuedId = rafQueue.keys().next().value;
+    ctrl.dispose();
+    assert.ok(cancelledIds.includes(queuedId));
+    assert.equal(rafQueue.size, 0);
+  } finally {
+    ctrl.dispose();
+  }
+});

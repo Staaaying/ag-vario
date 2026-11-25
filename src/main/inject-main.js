@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Main-process bridge and renderer injector for Antigravity v2.34.0.
+ * Main-process bridge and renderer injector for Antigravity 2.0.
  *
  * MIT Attribution: BaseWindow/contentView WebContents discovery and loopback
  * main-frame IPC sender verification reference `antigravity-context-viewer`
@@ -36,6 +36,7 @@ const boundWindows = new WeakSet();
 const boundWebContents = new WeakSet();
 const injectionTimers = new WeakMap();
 const probeTimers = new WeakMap();
+const inFlightByWc = new WeakMap();
 
 let defaultCollector = null;
 function getDefaultCollector() {
@@ -101,12 +102,19 @@ function getWindowWebContents(win, options = {}) {
   return null;
 }
 
+const RESOLVED_DEFAULT_RENDERER_DIR = path.resolve(DEFAULT_RENDERER_DIR);
+let cachedDefaultBundle = null;
+
 function buildRendererBundle(options = {}) {
   const rendererDir = options.rendererDir || DEFAULT_RENDERER_DIR;
+  const useCache = !options.rendererDir || path.resolve(rendererDir) === RESOLVED_DEFAULT_RENDERER_DIR;
+  if (useCache && cachedDefaultBundle !== null) {
+    return cachedDefaultBundle;
+  }
   const parts = RENDERER_FILES.map((filename) =>
     fs.readFileSync(path.join(rendererDir, filename), 'utf8')
   );
-  return [
+  const bundle = [
     '(function(){',
     '"use strict";',
     parts.join('\n'),
@@ -114,6 +122,8 @@ function buildRendererBundle(options = {}) {
     '})();',
     'true;'
   ].join('\n');
+  if (useCache) cachedDefaultBundle = bundle;
+  return bundle;
 }
 
 function registerIpcHandlers(options = {}) {
@@ -215,16 +225,34 @@ async function ensureInjected(win, options = {}) {
       return false;
     }
 
-    if (!options.force) {
-      try {
-        const alive = await wc.executeJavaScript('Boolean(window.__AGVario && window.__AGVario.isAlive())');
-        if (alive === true) return true;
-      } catch {}
+    const existing = inFlightByWc.get(wc);
+    if (existing) {
+      if (!options.force) return existing;
+      await existing.catch(() => {});
+      if (win.isDestroyed?.() || wc.isDestroyed?.()) return false;
     }
 
-    const bundle = buildRendererBundle(options);
-    await wc.executeJavaScript(bundle);
-    return true;
+    const run = (async () => {
+      if (!options.force) {
+        try {
+          const alive = await wc.executeJavaScript('Boolean(window.__AGVario && window.__AGVario.isAlive())');
+          if (alive === true) return true;
+        } catch {}
+      }
+
+      const bundle = buildRendererBundle(options);
+      await wc.executeJavaScript(bundle);
+      return true;
+    })();
+
+    inFlightByWc.set(wc, run);
+    try {
+      return await run;
+    } finally {
+      if (inFlightByWc.get(wc) === run) {
+        inFlightByWc.delete(wc);
+      }
+    }
   } catch {
     return false;
   }
@@ -247,7 +275,7 @@ function installAgVario(win, options = {}) {
     if (!wc || boundWebContents.has(wc)) return;
     boundWebContents.add(wc);
     wc.on?.('did-finish-load', () => {
-      void ensureInjected(win, { ...options, force: true });
+      void ensureInjected(win, { ...options, force: false });
     });
     wc.on?.('dom-ready', () => {
       void ensureInjected(win, { ...options, force: false });

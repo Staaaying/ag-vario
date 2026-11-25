@@ -220,7 +220,7 @@
       const costStr = day.totalTokens === 0
         ? '$0.00'
         : styles.formatUsd(day.costUsd, { isPriced: day.costUsd !== null, hasUnpriced: day.hasUnpriced });
-      return `<span class="agv-num">${styles.formatDateShort(day.dateKey)} · ${styles.formatTokensCompact(day.totalTokens)} tokens · ${styles.escapeHtml(costStr)}</span>`;
+      return `<span class="agv-num">${styles.escapeHtml(styles.formatDateShort(day.dateKey))} · ${styles.formatTokensCompact(day.totalTokens)} tokens · ${styles.escapeHtml(costStr)}</span>`;
     }
 
     function renderUsagePanel() {
@@ -286,7 +286,7 @@
         .map((d) => {
           const color = palette.heatmapRamp[d.level] || palette.heatmapRamp[0];
           const isSel = selectedDateKey === d.dateKey;
-          return `<button type="button" class="agv-heat-dot" data-date="${d.dateKey}" data-selected="${String(isSel)}" style="background:${color}" title="${d.dateKey}"></button>`;
+          return `<button type="button" class="agv-heat-dot" data-date="${styles.escapeHtml(d.dateKey)}" data-selected="${String(isSel)}" style="background:${color}" title="${styles.escapeHtml(d.dateKey)}"></button>`;
         })
         .join('');
 
@@ -336,7 +336,7 @@
         : '<div class="agv-muted">No sessions in selection</div>';
 
       const dayFilterPill = selectedDateKey
-        ? `<span class="agv-badge" style="gap:4px;">${styles.formatDateShort(selectedDateKey)} <button type="button" data-action="clear-day" style="font-size:10px;color:inherit;">×</button></span>`
+        ? `<span class="agv-badge" style="gap:4px;">${styles.escapeHtml(styles.formatDateShort(selectedDateKey))} <button type="button" data-action="clear-day" style="font-size:10px;color:inherit;">×</button></span>`
         : '';
 
       return `
