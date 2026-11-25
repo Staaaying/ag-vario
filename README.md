@@ -3,7 +3,7 @@
 **English** · [简体中文](README.zh-CN.md)
 
 [![macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#quick-start)
-[![Antigravity](https://img.shields.io/badge/Antigravity-v2.34.0-7db8e8.svg)](#quick-start)
+[![Antigravity](https://img.shields.io/badge/Antigravity-v2.35.1-7db8e8.svg)](#quick-start)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.5.0-68c28c.svg)](#quick-start)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-blue.svg)](#highlights)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -49,7 +49,7 @@ Named after a glider's *Variometer* — an instrument that shows altitude change
 Shown in the bottom toolbar of every visible chat pane (supports 2 / 3 / 4 split panes independently):
 
 - **`Session`**: Total session tokens, estimated API cost (USD), turns & steps, active model and reasoning effort, Cache / Input / Output breakdown with cache hit rate, average TTFT, output speed, and model time.
-- **`Context`**: Context usage ring (`<50%` green, `50%–79%` orange, `≥80%` red); click to view an estimated 5-category breakdown (`System Prompt`, `Skills & Rules`, `MCP Tools`, `Built-in Tools`, `Messages & Outputs`).
+- **`Context`**: Context usage ring (`<50%` green, `50%–79%` orange, `≥80%` red, showing compaction count inside the ring when compacted); click to view compaction details and an estimated 5-category breakdown (`System Prompt`, `Skills & Rules`, `MCP Tools`, `Built-in Tools`, `Messages & Outputs`).
 - **`Subagents`**: Active and total subagent count; click to inspect each subagent's status (`Running` / `Done` / `Error`), model, and context usage.
 
 ### Window Titlebar (Account-Wide)
@@ -60,7 +60,7 @@ Shown in the bottom toolbar of every visible chat pane (supports 2 / 3 / 4 split
 
 ## Quick Start
 
-**Requirements**: macOS · Antigravity 2.0 Desktop (tested on `v2.34.0`) · Node.js `>= 22.5.0` (zero dependencies, no `npm install` needed)
+**Requirements**: macOS · Antigravity 2.0 Desktop (tested on `v2.35.1`) · Node.js `>= 22.5.0` (zero dependencies, no `npm install` needed)
 
 ### Install
 

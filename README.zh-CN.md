@@ -3,7 +3,7 @@
 [English](README.md) · **简体中文**
 
 [![macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#快速开始)
-[![Antigravity](https://img.shields.io/badge/Antigravity-v2.34.0-7db8e8.svg)](#快速开始)
+[![Antigravity](https://img.shields.io/badge/Antigravity-v2.35.1-7db8e8.svg)](#快速开始)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.5.0-68c28c.svg)](#快速开始)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-blue.svg)](#特点)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -49,7 +49,7 @@
 显示在每个可见对话窗格的输入框底部工具栏（支持 2 / 3 / 4 分屏各自独立显示）：
 
 - **`Session`**：当前会话总 Token、预估 API 费用（USD）、对话轮数与步数、当前模型与推理档位、Cache / Input / Output 分布与缓存命中率、平均首字延迟（TTFT）、输出速度与模型耗时。
-- **`Context`**：上下文使用率圆环（`<50%` 绿、`50%–79%` 橙、`≥80%` 红），点击展开 5 大类占用估算（`System Prompt`、`Skills & Rules`、`MCP Tools`、`Built-in Tools`、`Messages & Outputs`）。
+- **`Context`**：上下文使用率圆环（`<50%` 绿、`50%–79%` 橙、`≥80%` 红，触发压缩后环心显示压缩次数），点击展开压缩详情与 5 大类占用估算（`System Prompt`、`Skills & Rules`、`MCP Tools`、`Built-in Tools`、`Messages & Outputs`）。
 - **`Subagents`**：子代理运行数与总数，点击查看各子代理状态（`Running` / `Done` / `Error`）、所用模型与上下文占用。
 
 ### 窗口顶栏（全局账号）
@@ -60,7 +60,7 @@
 
 ## 快速开始
 
-**环境要求**：macOS · Antigravity 2.0 桌面端（已验证版本 `v2.34.0`）· Node.js `>= 22.5.0`（零依赖，无需 `npm install`）
+**环境要求**：macOS · Antigravity 2.0 桌面端（已验证版本 `v2.35.1`）· Node.js `>= 22.5.0`（零依赖，无需 `npm install`）
 
 ### 安装
 

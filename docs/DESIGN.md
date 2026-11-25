@@ -1,7 +1,7 @@
 # `ag-vario` Design Specification
 
 > **Name**: `vario` comes from a glider's *Variometer* — a minimal, glanceable instrument that tells the pilot whether altitude is being gained or spent, matching Antigravity's aviation theme.  
-> **Scope**: macOS-only, read-only observability HUD for Antigravity 2.0 Desktop (verified baseline: `v2.34.0`).
+> **Scope**: macOS-only, read-only observability HUD for Antigravity 2.0 Desktop (verified baseline: `v2.35.1`).
 
 ---
 
