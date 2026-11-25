@@ -162,7 +162,7 @@ const MODEL_ENUM_FALLBACK = {
 
 function stripEffortSuffix(name) {
   return String(name || '')
-    .replace(/\s*\((?:Low|Medium|High|XHigh|Extra\s*High)\)\s*$/i, '')
+    .replace(/\s*\((?:Minimal|Low|Medium|High|XHigh|Extra\s*High|Max)\)\s*$/i, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -170,16 +170,18 @@ function stripEffortSuffix(name) {
 function extractEffortSuffix(name) {
   const s = String(name || '').trim();
   if (!s) return null;
-  let m = s.match(/\((Low|Medium|High|XHigh|Extra\s*High)\)\s*$/i);
+  let m = s.match(/\((Minimal|Low|Medium|High|XHigh|Extra\s*High|Max)\)\s*$/i);
   if (!m) {
-    m = s.match(/\s+(Extra\s*High|XHigh|High|Medium|Low)\s*$/i);
+    m = s.match(/\s+(Extra\s*High|XHigh|Minimal|Medium|High|Low|Max)\s*$/i);
   }
   if (!m) return null;
   const raw = m[1].toLowerCase().replace(/\s+/g, '');
-  if (raw === 'low') return 'Low';
-  if (raw === 'medium') return 'Medium';
-  if (raw === 'high') return 'High';
-  if (raw === 'xhigh' || raw === 'extrahigh') return 'XHigh';
+  if (raw === 'minimal') return 'minimal';
+  if (raw === 'low') return 'low';
+  if (raw === 'medium') return 'medium';
+  if (raw === 'high') return 'high';
+  if (raw === 'xhigh' || raw === 'extrahigh') return 'xhigh';
+  if (raw === 'max') return 'max';
   return null;
 }
 

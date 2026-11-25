@@ -11,8 +11,8 @@ test('pricing: resolves priced models including Neon, Orchestrator Carbon/Argon,
   });
   assert.equal(hydro.modelKey, 'gemini-4-hydrogen');
   assert.equal(hydro.displayName, 'Gemini 4 Hydrogen');
-  assert.equal(hydro.effort, 'High');
-  assert.equal(hydro.displayNameWithEffort, 'Gemini 4 Hydrogen (High)');
+  assert.equal(hydro.effort, 'high');
+  assert.equal(hydro.displayNameWithEffort, 'Gemini 4 Hydrogen (high)');
   assert.equal(hydro.isPriced, true);
 
   // Orchestrator (Carbon) has responseModel='gemini-pro-orchestrator' in real DBs
@@ -47,10 +47,16 @@ test('pricing: resolves priced models including Neon, Orchestrator Carbon/Argon,
   });
   assert.equal(neon.modelKey, 'gemini-4-neon');
   assert.equal(neon.displayName, 'Gemini 4 Neon');
-  assert.equal(neon.effort, 'XHigh');
-  assert.equal(neon.displayNameWithEffort, 'Gemini 4 Neon (XHigh)');
+  assert.equal(neon.effort, 'xhigh');
+  assert.equal(neon.displayNameWithEffort, 'Gemini 4 Neon (xhigh)');
   assert.equal(neon.isPriced, true);
   assert.equal(neon.pricingKey, 'gemini-4-neon');
+
+  assert.equal(pricing.resolveModelIdentity('Gemini 4 Neon (Low)').displayNameWithEffort, 'Gemini 4 Neon (low)');
+  assert.equal(pricing.resolveModelIdentity('Gemini 4 Neon (Medium)').displayNameWithEffort, 'Gemini 4 Neon (medium)');
+  assert.equal(pricing.resolveModelIdentity('Gemini 4 Neon Extra High').displayNameWithEffort, 'Gemini 4 Neon (xhigh)');
+  assert.equal(pricing.resolveModelIdentity('Gemini 4 Neon (Minimal)').displayNameWithEffort, 'Gemini 4 Neon (minimal)');
+  assert.equal(pricing.resolveModelIdentity('Gemini 4 Neon (Max)').displayNameWithEffort, 'Gemini 4 Neon (max)');
 
   const noEffort = pricing.resolveModelIdentity({ responseModel: 'gemini-4-neon' });
   assert.equal(noEffort.effort, null);
