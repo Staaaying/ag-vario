@@ -4,7 +4,7 @@
 
 [![macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#quick-start)
 [![Antigravity](https://img.shields.io/badge/Antigravity-v2.35.1-7db8e8.svg)](#quick-start)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.5.0-68c28c.svg)](#quick-start)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.13.0-68c28c.svg)](#quick-start)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-blue.svg)](#highlights)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -38,7 +38,7 @@ Named after a glider's *Variometer* — an instrument that shows altitude change
 ## Highlights
 
 - **Native look & feel**: Frosted-glass styling that adapts automatically to Antigravity's Dark and Light themes, with zero background rendering when panels are closed.
-- **Strictly read-only**: Only reads local session data and local endpoints; never modifies prompts, model settings, or network traffic.
+- **Strictly read-only**: Processes all session, context, and usage data locally without uploading conversations or telemetry; never modifies prompts, model settings, or host traffic.
 - **Zero third-party dependencies**: Built solely on Node.js built-ins — no `npm install` needed — with bundled install and lossless restore scripts.
 
 ---
@@ -60,7 +60,7 @@ Shown in the bottom toolbar of every visible chat pane (supports 2 / 3 / 4 split
 
 ## Quick Start
 
-**Requirements**: macOS · Antigravity 2.0 Desktop (tested on `v2.35.1`) · Node.js `>= 22.5.0` (zero dependencies, no `npm install` needed)
+**Requirements**: macOS · Antigravity 2.0 Desktop (tested on `v2.35.1`) · Node.js `>= 22.13.0` (zero dependencies, no `npm install` needed)
 
 ### Install
 
@@ -96,9 +96,11 @@ Paste this into Antigravity:
 
 ## Notes
 
+- **Privacy & network**: All session, context, and usage analytics run locally with no conversation or telemetry upload. The only outbound read-only HTTPS requests are daily syncs of the official Google (`ai.google.dev`) and Anthropic (`platform.claude.com`) public pricing pages (falling back to built-in rates offline) and fetching/caching the host-provided `profilePictureUrl` avatar (falling back to initials).
 - **Cost & estimates**: Costs are estimated from public API rates (USD), priced per session using the first model called; the 5-category context breakdown is an estimate based on content size.
 - **MCP category**: `MCP Tools` classification is implemented against the client's data schema, but has not yet been verified against a live MCP server.
-- **App updates**: Updating Antigravity overwrites its application bundle; re-run `npm run hud:install` after an update.
+- **Code signing & restore**: Installing patches `app.asar` and invalidates Antigravity's original app code signature; `npm run hud:restore` restores the original `app.asar` byte-for-byte and reinstates the official signature.
+- **App updates & troubleshooting**: Updating Antigravity overwrites its application bundle—re-run `npm run hud:install` afterward. On write permission errors, check write access to `/Applications/Antigravity.app` (avoid `sudo`, which can leave cache files owned by `root`); if no clean `app.asar` source is found (e.g., after another injector), reinstall official Antigravity or pass `--clean-source <path>`.
 - **Local storage**: Original backups and plugin caches are stored under `~/Library/Application Support/ag-vario/`, without writing to Antigravity's own data directory.
 
 ---

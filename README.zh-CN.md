@@ -4,7 +4,7 @@
 
 [![macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#快速开始)
 [![Antigravity](https://img.shields.io/badge/Antigravity-v2.35.1-7db8e8.svg)](#快速开始)
-[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.5.0-68c28c.svg)](#快速开始)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.13.0-68c28c.svg)](#快速开始)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-blue.svg)](#特点)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -38,7 +38,7 @@
 ## 特点
 
 - **融入原生界面**：毛玻璃风格自动适配 Antigravity 深色与浅色主题，面板收起时零后台渲染开销。
-- **纯只读观测**：仅读取本地会话记录与本地接口，不改动提示词、模型配置或网络请求。
+- **纯只读观测**：所有会话、上下文与用量数据均在本地只读处理，不上传对话或遥测，不改动提示词、模型配置或宿主网络请求。
 - **零第三方依赖**：仅使用 Node.js 原生能力，无需 `npm install`，自带安装与一键无损还原脚本。
 
 ---
@@ -60,7 +60,7 @@
 
 ## 快速开始
 
-**环境要求**：macOS · Antigravity 2.0 桌面端（已验证版本 `v2.35.1`）· Node.js `>= 22.5.0`（零依赖，无需 `npm install`）
+**环境要求**：macOS · Antigravity 2.0 桌面端（已验证版本 `v2.35.1`）· Node.js `>= 22.13.0`（零依赖，无需 `npm install`）
 
 ### 安装
 
@@ -96,9 +96,11 @@ cd ag-vario && npm run hud:restore
 
 ## 说明
 
+- **隐私与网络**：所有会话、上下文和用量统计均在本地完成，不上传对话或遥测。仅有的外网只读 HTTPS 请求为每日同步 Google（`ai.google.dev`）与 Anthropic（`platform.claude.com`）官方公开定价页（离线自动回退内置费率），以及拉取并缓存宿主返回的 `profilePictureUrl` 头像（失败时回退为姓名首字母）。
 - **费用与估算**：费用基于公开 API 单价折算（USD），单会话按首次调用的模型计价；上下文 5 类占比为按内容体量估算的参考值。
 - **MCP 分类**：`MCP Tools` 分类已按客户端数据结构实现，但暂未在连接真实 MCP 服务器的环境下验证。
-- **客户端升级**：Antigravity 更新会覆盖应用文件，升级后重新执行一次 `npm run hud:install` 即可。
+- **应用签名与还原**：安装会改写 `app.asar` 并使原应用代码签名失效；执行 `npm run hud:restore` 可逐字节无损还原原版 `app.asar` 并恢复官方签名。
+- **客户端更新与排障**：Antigravity 更新会覆盖应用文件，升级后重新执行一次 `npm run hud:install` 即可。遇到写权限报错时请检查 `/Applications/Antigravity.app` 的写权限（避免直接使用 `sudo`，以免缓存目录属主变为 `root`）；若提示找不到洁净的 `app.asar` 源（例如已被其他插件修改），请重装官方 Antigravity 或通过 `--clean-source <path>` 指定原版路径。
 - **本地数据位置**：原版备份与插件缓存均保存在 `~/Library/Application Support/ag-vario/`，不会写入 Antigravity 自身数据目录。
 
 ---
