@@ -115,7 +115,7 @@ test('install & restore: clean backup, unpacked/executable preservation, dirty c
 
     // Fail-closed if no clean source given and target is dirty
     assert.throws(
-      () => install({ targetAsar, stateDir: path.join(tmpRoot, 'fail-state'), upstreamBackupDir: null }),
+      () => install({ targetAsar, stateDir: path.join(tmpRoot, 'fail-state') }),
       /No clean official Antigravity app\.asar source found/
     );
 
@@ -162,6 +162,114 @@ test('install & restore: clean backup, unpacked/executable preservation, dirty c
     // Corrupted backup refuses restore
     fs.writeFileSync(res1.backupPath, Buffer.from('corrupted', 'utf8'));
     assert.throws(() => restore({ targetAsar, stateDir }), /Backup checksum mismatch/);
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+
+test('install & verify: streaming repack handles missing integrity fields and detects packed byte corruption', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-vario-asar-stream-'));
+  try {
+    const { verifyPackedAgainstSource, collectAgVarioPayload } = require('../scripts/install');
+    const srcNoIntegrity = path.join(tmpRoot, 'no-integrity.asar');
+    const dstRepacked = path.join(tmpRoot, 'repacked.asar');
+
+    // Build ASAR without integrity fields on entries
+    const filesMap = makeOfficialFiles();
+    filesMap.set('empty.txt', Buffer.alloc(0));
+    let offset = 0;
+    const chunks = [];
+    const root = { files: {} };
+    for (const [rel, buf] of filesMap.entries()) {
+      const parts = rel.split('/');
+      let dir = root.files;
+      for (let i = 0; i < parts.length - 1; i++) {
+        if (!dir[parts[i]]) dir[parts[i]] = { files: {} };
+        dir = dir[parts[i]].files;
+      }
+      dir[parts[parts.length - 1]] = { size: buf.length, offset: String(offset) };
+      offset += buf.length;
+      chunks.push(buf);
+    }
+    const jsonBuf = Buffer.from(JSON.stringify(root), 'utf8');
+    const pad = (4 - (jsonBuf.length % 4)) % 4;
+    const header = Buffer.alloc(16 + jsonBuf.length + pad);
+    header.writeUInt32LE(4, 0);
+    header.writeUInt32LE(8 + jsonBuf.length + pad, 4);
+    header.writeUInt32LE(4 + jsonBuf.length + pad, 8);
+    header.writeUInt32LE(jsonBuf.length, 12);
+    jsonBuf.copy(header, 16);
+    const fd = fs.openSync(srcNoIntegrity, 'w');
+    fs.writeSync(fd, header);
+    for (const c of chunks) if (c.length > 0) fs.writeSync(fd, c);
+    fs.closeSync(fd);
+
+    const { additions } = collectAgVarioPayload(path.resolve(__dirname, '..'), { hostVersion: '2.34.0' });
+    const packRes = asarLib.repackAsarWithOverlay(srcNoIntegrity, dstRepacked, { additions });
+    assert.equal(packRes.fileSha256, asarLib.sha256File(dstRepacked));
+
+    const entries = new Map(asarLib.listAsarFiles(dstRepacked).map((e) => [e.path, e]));
+    assert.ok(entries.get('dist/main.js').integrity?.hash);
+    assert.equal(entries.get('empty.txt').integrity?.blocks?.length, 1);
+
+    // Verification passes before corruption
+    assert.equal(verifyPackedAgainstSource(srcNoIntegrity, dstRepacked, additions), filesMap.size);
+
+    // Flip 1 byte in dist/main.js inside packed ASAR -> verifyPackedAgainstSource rejects
+    const parsed = asarLib.readAsarHeader(dstRepacked);
+    const mainNode = asarLib.getAsarNode(parsed.header, 'dist/main.js');
+    const corruptFd = fs.openSync(dstRepacked, 'r+');
+    const one = Buffer.alloc(1);
+    const pos = parsed.baseOffset + Number(mainNode.offset);
+    fs.readSync(corruptFd, one, 0, 1, pos);
+    one[0] = one[0] ^ 0xff;
+    fs.writeSync(corruptFd, one, 0, 1, pos);
+    fs.closeSync(corruptFd);
+
+    assert.throws(
+      () => verifyPackedAgainstSource(srcNoIntegrity, dstRepacked, additions),
+      /Unexpected content modification in dist\/main\.js/
+    );
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('restore: refuses cross-target restore, detects host upgrade, and allows --force override', () => {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ag-vario-restore-guards-'));
+  try {
+    const targetAsar = path.join(tmpRoot, 'app.asar');
+    const otherAsar = path.join(tmpRoot, 'other.asar');
+    const stateDir = path.join(tmpRoot, 'state');
+
+    const officialFiles = makeOfficialFiles();
+    buildSyntheticAsar(targetAsar, officialFiles);
+    buildSyntheticAsar(otherAsar, officialFiles);
+    const origSha = asarLib.sha256File(targetAsar);
+
+    const inst = install({ targetAsar, stateDir });
+    assert.equal(inst.ok, true);
+
+    // 1. Cross-target mismatch rejected
+    assert.throws(
+      () => restore({ targetAsar: otherAsar, stateDir }),
+      /refusing cross-target restore/
+    );
+
+    // 2. Host upgrade (clean modified ASAR without ag-vario markers) rejected without --force
+    const upgradedFiles = makeOfficialFiles();
+    upgradedFiles.set('dist/main.js', Buffer.from('console.log("host upgraded");', 'utf8'));
+    buildSyntheticAsar(targetAsar, upgradedFiles);
+    assert.throws(
+      () => restore({ targetAsar, stateDir }),
+      /host may have updated/
+    );
+
+    // 3. --force overrides host-upgrade guard and restores original verified backup
+    const forced = restore({ targetAsar, stateDir, force: true });
+    assert.equal(forced.ok, true);
+    assert.equal(forced.sha256, origSha);
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }

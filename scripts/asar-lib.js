@@ -14,13 +14,107 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const INTEGRITY_BLOCK_SIZE = 4 * 1024 * 1024;
+const IO_CHUNK_SIZE = 1024 * 1024;
+
+function writeAllSync(fd, buf, offset = 0, length = buf.length) {
+  let written = 0;
+  while (written < length) {
+    const n = fs.writeSync(fd, buf, offset + written, length - written);
+    if (n <= 0) throw new Error('Short write to ASAR archive');
+    written += n;
+  }
+}
+
+function readExactSync(fd, buf, offset, length, position) {
+  let readTotal = 0;
+  while (readTotal < length) {
+    const n = fs.readSync(fd, buf, offset + readTotal, length - readTotal, position + readTotal);
+    if (n <= 0) throw new Error('Unexpected EOF reading ASAR archive');
+    readTotal += n;
+  }
+}
 
 function sha256Buffer(buf) {
   return crypto.createHash('sha256').update(buf).digest('hex');
 }
 
 function sha256File(filePath) {
-  return sha256Buffer(fs.readFileSync(filePath));
+  const fd = fs.openSync(filePath, 'r');
+  const hash = crypto.createHash('sha256');
+  const chunk = Buffer.allocUnsafe(IO_CHUNK_SIZE);
+  let pos = 0;
+  try {
+    while (true) {
+      const n = fs.readSync(fd, chunk, 0, chunk.length, pos);
+      if (n <= 0) break;
+      hash.update(chunk.subarray(0, n));
+      pos += n;
+    }
+    return hash.digest('hex');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function sha256FdSlice(fd, startOffset, size, chunkBuf = null) {
+  const total = Number(size) || 0;
+  const hash = crypto.createHash('sha256');
+  if (total === 0) return hash.digest('hex');
+  const buf = chunkBuf || Buffer.allocUnsafe(Math.min(IO_CHUNK_SIZE, total));
+  let remaining = total;
+  let pos = Number(startOffset) || 0;
+  while (remaining > 0) {
+    const toRead = Math.min(buf.length, remaining);
+    readExactSync(fd, buf, 0, toRead, pos);
+    hash.update(buf.subarray(0, toRead));
+    pos += toRead;
+    remaining -= toRead;
+  }
+  return hash.digest('hex');
+}
+
+function computeAsarIntegrityFromFd(fd, startOffset, size, chunkBuf = null) {
+  const total = Number(size) || 0;
+  if (total === 0) {
+    const emptyHex = sha256Buffer(Buffer.alloc(0));
+    return {
+      algorithm: 'SHA256',
+      hash: emptyHex,
+      blockSize: INTEGRITY_BLOCK_SIZE,
+      blocks: [emptyHex]
+    };
+  }
+  const fileHash = crypto.createHash('sha256');
+  const blocks = [];
+  const buf = chunkBuf || Buffer.allocUnsafe(Math.min(IO_CHUNK_SIZE, total));
+  let remaining = total;
+  let pos = Number(startOffset) || 0;
+  let blockHash = crypto.createHash('sha256');
+  let blockFilled = 0;
+  while (remaining > 0) {
+    const toRead = Math.min(buf.length, remaining, INTEGRITY_BLOCK_SIZE - blockFilled);
+    readExactSync(fd, buf, 0, toRead, pos);
+    const slice = buf.subarray(0, toRead);
+    fileHash.update(slice);
+    blockHash.update(slice);
+    pos += toRead;
+    remaining -= toRead;
+    blockFilled += toRead;
+    if (blockFilled === INTEGRITY_BLOCK_SIZE) {
+      blocks.push(blockHash.digest('hex'));
+      blockHash = crypto.createHash('sha256');
+      blockFilled = 0;
+    }
+  }
+  if (blockFilled > 0) {
+    blocks.push(blockHash.digest('hex'));
+  }
+  return {
+    algorithm: 'SHA256',
+    hash: fileHash.digest('hex'),
+    blockSize: INTEGRITY_BLOCK_SIZE,
+    blocks
+  };
 }
 
 function readAsarHeader(archivePath) {
@@ -79,15 +173,14 @@ function extractAsarFile(archivePath, relPath) {
   if (size === 0) return buf;
   const fd = fs.openSync(archivePath, 'r');
   try {
-    fs.readSync(fd, buf, 0, size, baseOffset + offset);
+    readExactSync(fd, buf, 0, size, baseOffset + offset);
     return buf;
   } finally {
     fs.closeSync(fd);
   }
 }
 
-function listAsarFiles(archivePath) {
-  const { header } = readAsarHeader(archivePath);
+function collectAsarEntries(header) {
   const entries = [];
   function walk(tree, prefix) {
     for (const [name, info] of Object.entries(tree.files || {})) {
@@ -98,6 +191,7 @@ function listAsarFiles(archivePath) {
         entries.push({
           path: rel,
           size: Number(info.size) || 0,
+          offset: Number(info.offset) || 0,
           unpacked: Boolean(info.unpacked),
           executable: Boolean(info.executable),
           link: info.link || null,
@@ -108,6 +202,11 @@ function listAsarFiles(archivePath) {
   }
   walk(header, '');
   return entries;
+}
+
+function listAsarFiles(archivePath) {
+  const { header } = readAsarHeader(archivePath);
+  return collectAsarEntries(header);
 }
 
 function computeAsarIntegrity(buf) {
@@ -177,7 +276,8 @@ function repackAsarWithOverlay(sourceAsar, destAsar, { replacements = new Map(),
     }
 
     let offset = 0;
-    const chunks = [];
+    const writePlan = [];
+    const chunkBuf = Buffer.allocUnsafe(IO_CHUNK_SIZE);
 
     function finalizeTree(node) {
       const outFiles = {};
@@ -195,7 +295,7 @@ function repackAsarWithOverlay(sourceAsar, destAsar, { replacements = new Map(),
           };
           if (info.executable) fileObj.executable = true;
           offset += buf.length;
-          chunks.push(buf);
+          if (buf.length > 0) writePlan.push({ type: 'buffer', buf });
           outFiles[name] = fileObj;
         } else if (info.link) {
           outFiles[name] = { link: info.link };
@@ -206,19 +306,15 @@ function repackAsarWithOverlay(sourceAsar, destAsar, { replacements = new Map(),
           outFiles[name] = obj;
         } else {
           const size = Number(info.size) || 0;
-          const srcOffset = Number(info.offset) || 0;
-          const buf = Buffer.alloc(size);
-          if (size > 0) {
-            fs.readSync(srcFd, buf, 0, size, baseOffset + srcOffset);
-          }
+          const absSrcOffset = baseOffset + (Number(info.offset) || 0);
           const fileObj = {
             size,
             offset: String(offset),
-            integrity: info.integrity || computeAsarIntegrity(buf)
+            integrity: info.integrity || computeAsarIntegrityFromFd(srcFd, absSrcOffset, size, chunkBuf)
           };
           if (info.executable) fileObj.executable = true;
           offset += size;
-          chunks.push(buf);
+          if (size > 0) writePlan.push({ type: 'src', srcOffset: absSrcOffset, size });
           outFiles[name] = fileObj;
         }
       }
@@ -237,19 +333,36 @@ function repackAsarWithOverlay(sourceAsar, destAsar, { replacements = new Map(),
     headerBuf.writeUInt32LE(jsonSize, 12);
     jsonBuf.copy(headerBuf, 16);
 
+    const fileHash = crypto.createHash('sha256');
     fs.mkdirSync(path.dirname(destAsar), { recursive: true });
     const outFd = fs.openSync(destAsar, 'w');
     try {
-      fs.writeSync(outFd, headerBuf);
-      for (const chunk of chunks) {
-        if (chunk.length > 0) fs.writeSync(outFd, chunk);
+      writeAllSync(outFd, headerBuf);
+      fileHash.update(headerBuf);
+      for (const item of writePlan) {
+        if (item.type === 'buffer') {
+          writeAllSync(outFd, item.buf);
+          fileHash.update(item.buf);
+        } else {
+          let remaining = item.size;
+          let pos = item.srcOffset;
+          while (remaining > 0) {
+            const toCopy = Math.min(chunkBuf.length, remaining);
+            readExactSync(srcFd, chunkBuf, 0, toCopy, pos);
+            const slice = chunkBuf.subarray(0, toCopy);
+            writeAllSync(outFd, slice);
+            fileHash.update(slice);
+            pos += toCopy;
+            remaining -= toCopy;
+          }
+        }
       }
     } finally {
       fs.closeSync(outFd);
     }
 
     return {
-      fileSha256: sha256File(destAsar),
+      fileSha256: fileHash.digest('hex'),
       headerSha256: sha256Buffer(jsonBuf)
     };
   } finally {
@@ -295,9 +408,11 @@ function atomicReplaceFile(srcPath, targetPath, expectedSha256) {
 module.exports = {
   sha256Buffer,
   sha256File,
+  sha256FdSlice,
   readAsarHeader,
   getAsarNode,
   extractAsarFile,
+  collectAsarEntries,
   listAsarFiles,
   computeAsarIntegrity,
   repackAsarWithOverlay,

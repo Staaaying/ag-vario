@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Safe backup + overlay installer for ag-vario into Antigravity v2.34.0 app.asar.
+ * Safe backup + overlay installer for ag-vario into Antigravity 2.0 app.asar.
  *
  * MIT Attribution: The unique `loadHubWindowUrl` window-load anchor regex and
  * post-pack ASAR audit approach reference `antigravity-context-viewer`
@@ -153,14 +153,7 @@ function resolveCleanSourceAsar({
   targetAsar,
   targetVersion,
   stateDir,
-  cleanSourcePath = null,
-  upstreamBackupDir = path.join(
-    os.homedir(),
-    'Library',
-    'Application Support',
-    'AntigravityContextMeter',
-    'backups'
-  )
+  cleanSourcePath = null
 }) {
   const plistHash = asarLib.readInfoPlistAsarHash(targetAsar);
   const verifyCandidate = (candidatePath, expectedFileSha = null, requirePlistMatch = false) => {
@@ -197,28 +190,16 @@ function resolveCleanSourceAsar({
     return targetAsar;
   }
 
-  // Fallback: locate verified official clean backup stored by upstream installer
-  if (targetVersion && upstreamBackupDir && fs.existsSync(upstreamBackupDir)) {
-    const candidates = fs
-      .readdirSync(upstreamBackupDir)
-      .filter((f) => f.startsWith(`app-${targetVersion}-`) && f.endsWith('-base.asar'))
-      .sort();
-    for (const f of candidates) {
-      const full = path.join(upstreamBackupDir, f);
-      if (verifyCandidate(full, null, true)) {
-        return full;
-      }
-    }
-  }
-
   throw new Error(
     'No clean official Antigravity app.asar source found. Pass --clean-source <path> pointing to an unmodified official archive.'
   );
 }
 
 function verifyPackedAgainstSource(sourceAsar, packedAsar, additions) {
-  const srcFiles = asarLib.listAsarFiles(sourceAsar);
-  const dstList = asarLib.listAsarFiles(packedAsar);
+  const srcParsed = asarLib.readAsarHeader(sourceAsar);
+  const dstParsed = asarLib.readAsarHeader(packedAsar);
+  const srcFiles = asarLib.collectAsarEntries(srcParsed.header);
+  const dstList = asarLib.collectAsarEntries(dstParsed.header);
   const dstMap = new Map(dstList.map((e) => [e.path, e]));
   const replaced = new Set(['dist/utils.js', 'dist/preload.js']);
 
@@ -226,25 +207,41 @@ function verifyPackedAgainstSource(sourceAsar, packedAsar, additions) {
     throw new Error('Unexpected leftover dist/meter-main.js in packed ASAR');
   }
 
-  for (const s of srcFiles) {
-    const d = dstMap.get(s.path);
-    if (!d) throw new Error(`Missing original file in packed ASAR: ${s.path}`);
-    if (s.unpacked !== d.unpacked) throw new Error(`Unpacked flag changed: ${s.path}`);
-    if (s.executable !== d.executable) throw new Error(`Executable flag changed: ${s.path}`);
-    if (s.link !== d.link) throw new Error(`Symlink target changed: ${s.path}`);
-    if (!s.unpacked && !s.link && !replaced.has(s.path)) {
-      const sHash = asarLib.sha256Buffer(asarLib.extractAsarFile(sourceAsar, s.path));
-      const dHash = asarLib.sha256Buffer(asarLib.extractAsarFile(packedAsar, d.path));
-      if (sHash !== dHash) throw new Error(`Unexpected content modification in ${s.path}`);
+  let srcFd = null;
+  let dstFd = null;
+  const chunkBuf = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    srcFd = fs.openSync(sourceAsar, 'r');
+    dstFd = fs.openSync(packedAsar, 'r');
+    for (const s of srcFiles) {
+      const d = dstMap.get(s.path);
+      if (!d) throw new Error(`Missing original file in packed ASAR: ${s.path}`);
+      if (s.unpacked !== d.unpacked) throw new Error(`Unpacked flag changed: ${s.path}`);
+      if (s.executable !== d.executable) throw new Error(`Executable flag changed: ${s.path}`);
+      if (s.link !== d.link) throw new Error(`Symlink target changed: ${s.path}`);
+      if (!s.unpacked && !s.link && !replaced.has(s.path)) {
+        if (s.size !== d.size) throw new Error(`Unexpected size change in ${s.path}`);
+        const sHash = asarLib.sha256FdSlice(srcFd, srcParsed.baseOffset + s.offset, s.size, chunkBuf);
+        const dHash = asarLib.sha256FdSlice(dstFd, dstParsed.baseOffset + d.offset, d.size, chunkBuf);
+        if (sHash !== dHash) throw new Error(`Unexpected content modification in ${s.path}`);
+      }
     }
-  }
 
-  for (const [rel, buf] of additions.entries()) {
-    const d = dstMap.get(rel);
-    if (!d) throw new Error(`Missing added file in packed ASAR: ${rel}`);
-    const dHash = asarLib.sha256Buffer(asarLib.extractAsarFile(packedAsar, rel));
-    if (dHash !== asarLib.sha256Buffer(buf)) {
-      throw new Error(`Checksum mismatch on added file ${rel}`);
+    for (const [rel, buf] of additions.entries()) {
+      const d = dstMap.get(rel);
+      if (!d) throw new Error(`Missing added file in packed ASAR: ${rel}`);
+      if (d.size !== buf.length) throw new Error(`Size mismatch on added file ${rel}`);
+      const dHash = asarLib.sha256FdSlice(dstFd, dstParsed.baseOffset + d.offset, d.size, chunkBuf);
+      if (dHash !== asarLib.sha256Buffer(buf)) {
+        throw new Error(`Checksum mismatch on added file ${rel}`);
+      }
+    }
+  } finally {
+    if (srcFd !== null) {
+      try { fs.closeSync(srcFd); } catch {}
+    }
+    if (dstFd !== null) {
+      try { fs.closeSync(dstFd); } catch {}
     }
   }
 
@@ -267,8 +264,7 @@ function install(options = {}) {
     targetAsar,
     targetVersion: hostVersion,
     stateDir,
-    cleanSourcePath: options.cleanSourcePath || null,
-    ...(options.upstreamBackupDir !== undefined ? { upstreamBackupDir: options.upstreamBackupDir } : {})
+    cleanSourcePath: options.cleanSourcePath || null
   });
 
   // Ensure independent verified backup under ag-vario's own stateDir
@@ -299,6 +295,7 @@ function install(options = {}) {
 
   const { additions, version } = collectAgVarioPayload(projectRoot, { hostVersion });
   const stagingAsar = path.join(stateDir, `staging-${process.pid}-${Date.now()}.asar`);
+  const manifestTmp = path.join(stateDir, `installation.tmp-${process.pid}.json`);
 
   try {
     const packRes = asarLib.repackAsarWithOverlay(backupPath, stagingAsar, { replacements, additions });
@@ -322,15 +319,16 @@ function install(options = {}) {
     };
 
     const manifestPath = path.join(stateDir, 'installation.json');
-    const manifestTmp = path.join(stateDir, `installation.tmp-${process.pid}.json`);
     fs.writeFileSync(manifestTmp, JSON.stringify(manifest, null, 2), 'utf8');
     fs.renameSync(manifestTmp, manifestPath);
 
     return { ok: true, ...manifest };
   } finally {
-    try {
-      if (fs.existsSync(stagingAsar)) fs.unlinkSync(stagingAsar);
-    } catch {}
+    for (const tmpFile of [stagingAsar, manifestTmp]) {
+      try {
+        if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+      } catch {}
+    }
   }
 }
 
@@ -382,5 +380,6 @@ module.exports = {
   patchPreloadSource,
   collectAgVarioPayload,
   resolveCleanSourceAsar,
+  verifyPackedAgainstSource,
   install
 };
