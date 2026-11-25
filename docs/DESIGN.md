@@ -37,7 +37,7 @@ All popovers are **click-to-toggle** (dismiss via second click, `Escape`, or cli
 
 Mounted inside each visible chat composer before the right-hand controls (separated by a subtle divider), supporting single-pane and 2/3/4+ split-pane layouts:
 - Compact spacing below `520px` pane width; fallback row below `agent-input-box` under `340px`;
-- Popovers (`288px` wide) open upward by default and flip downward automatically when a pane sits near the top of the viewport (e.g., 2×2 splits).
+- Popovers (`288px` wide) render in the browser Top Layer (`popover="manual"`), open upward by default (flipping downward near the top of the viewport, e.g., 2×2 splits), left-align to triggers and clamp within the current pane's horizontal bounds (falling back to viewport clamping on `<304px` narrow panes).
 
 1. **`Session`**
    - **Persistent**: Icon + total session tokens (main + subagents).
@@ -66,4 +66,4 @@ Two subtle pills in the titlebar, opening downward:
 
 - **Exact host-reported values**: Context usage & limits, compaction checkpoints (`CORTEX_STEP_TYPE_CHECKPOINT` / `chatStartMetadata.startStepIndex` / `truncationReason`) & pre/post prompt tokens, turns, steps, `inputTokens` / `outputTokens` / `cacheReadTokens`, cache hit rate (`cacheRead / (input + cacheRead)`), TTFT, output speed, model time, subagent/workflow tree, quota pool fractions & reset timestamps, and daily token totals.
 - **Estimated values**: 5-category context breakdown (scaled to exact prompt tokens; note `MCP Tools` classification matches Protobuf definitions and has not yet been end-to-end verified against a live MCP server) and USD API cost (built-in official rates + daily HTTPS sync from official Gemini/Claude pricing pages, cached locally; unpriced models labeled `Unpriced`).
-- **Visual language (`Native Frosted`)**: Dark translucent backdrop blur, inherited host sans-serif typography with `tabular-nums` on numbers, and low-saturation Ice Blue (`#7db8e8`) as the primary data accent.
+- **Visual language (`Native Frosted`)**: Translucent backdrop blur adapting automatically to Antigravity's Dark and Light themes (elevated white surfaces on cool frosted chrome in Light mode), inherited host sans-serif typography with `tabular-nums` on numbers, and Ice Blue (`#7db8e8` dark / `#256fb3` light) as the primary data accent.

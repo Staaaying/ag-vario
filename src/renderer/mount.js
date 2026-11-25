@@ -2,20 +2,22 @@
   const mod =
     typeof module === 'object' && module.exports
       ? {
+          styles: require('./styles'),
           composerBar: require('./composer-bar'),
           topbarBar: require('./topbar-bar')
         }
       : {
+          styles: root.__AGVarioModules.styles,
           composerBar: root.__AGVarioModules.composerBar,
           topbarBar: root.__AGVarioModules.topbarBar
         };
-  const api = factory(mod.composerBar, mod.topbarBar);
+  const api = factory(mod.styles, mod.composerBar, mod.topbarBar);
   if (typeof module === 'object' && module.exports) {
     module.exports = api;
   }
   const mods = (root.__AGVarioModules = root.__AGVarioModules || {});
   mods.mount = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (composerBar, topbarBar) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (styles, composerBar, topbarBar) {
   'use strict';
 
   /**
@@ -161,11 +163,6 @@
     });
   }
 
-  function findFocusedComposerAnchor(doc) {
-    const anchors = findComposerAnchors(doc);
-    return anchors.find((a) => a.isFocused) || anchors[0] || null;
-  }
-
   function resolvePaneConversationId(anchor, href, paneIndex = 0, totalPanes = 1) {
     if (anchor?.hasCascadeAttr) {
       return anchor.cascadeId || null;
@@ -181,10 +178,6 @@
       return focusedId || ids[0] || null;
     }
     return ids[paneIndex] || null;
-  }
-
-  function resolveActiveConversationId(compAnchor, href) {
-    return resolvePaneConversationId(compAnchor, href, 0, 1);
   }
 
   function findTopbarAnchor(doc) {
@@ -242,8 +235,20 @@
     let lastCheckedHref = win?.location?.href || '';
     let interactionSyncTimer = null;
     let sessionTick = 0;
+    let currentTheme = styles.detectHostTheme(doc, win);
 
     let topbar = null;
+
+    function syncTheme() {
+      const nextTheme = styles.detectHostTheme(doc, win);
+      if (nextTheme === currentTheme) return false;
+      currentTheme = nextTheme;
+      topbar?.setTheme?.(currentTheme);
+      for (const entry of paneEntries.values()) {
+        entry.composer.setTheme?.(currentTheme);
+      }
+      return true;
+    }
 
     function closeAllComposers(exceptKey = null) {
       for (const entry of paneEntries.values()) {
@@ -276,6 +281,7 @@
         doc,
         win,
         hostId: null,
+        theme: currentTheme,
         onOpenCard: () => {
           closeAllComposers(entry.key);
           topbar?.close();
@@ -354,6 +360,7 @@
     topbar = topbarBar.createTopbarBar({
       doc,
       win,
+      theme: currentTheme,
       onOpenPanel: () => {
         closeAllComposers(null);
       },
@@ -450,6 +457,7 @@
       const hrefChanged = href !== lastCheckedHref;
       lastCheckedHref = href;
 
+      syncTheme();
       syncTopbarAnchor();
 
       const anchors = Array.isArray(prefetchedAnchors) ? prefetchedAnchors : findComposerAnchors(doc);
@@ -558,6 +566,13 @@
       closeAllComposers(null);
       topbar.close();
     };
+    const onDocFocusIn = (e) => {
+      const target = e?.target;
+      if (target?.closest?.('[role="dialog"], [aria-modal="true"]')) {
+        closeAllComposers(null);
+        topbar.close();
+      }
+    };
     const PANE_EVENT_SELECTOR =
       '[data-pane-id], [data-sidebar-row-id], [data-testid="model-selector-trigger"], [role="menuitem"], [role="option"], [role="listbox"], a[href]';
     const onPaneEvent = (e) => {
@@ -575,6 +590,36 @@
     const onResize = () => {
       if (!disposed) syncAll();
     };
+
+    let themeObserver = null;
+    const MutationObsCtor = win?.MutationObserver || (typeof MutationObserver === 'function' ? MutationObserver : null);
+    if (MutationObsCtor) {
+      try {
+        themeObserver = new MutationObsCtor(() => {
+          if (!disposed) syncTheme();
+        });
+        const obsOpts = { attributes: true, attributeFilter: ['style', 'class', 'data-theme'] };
+        if (doc.documentElement) themeObserver.observe(doc.documentElement, obsOpts);
+        if (doc.body) themeObserver.observe(doc.body, obsOpts);
+      } catch {
+        themeObserver = null;
+      }
+    }
+
+    let themeMediaQuery = null;
+    const onThemeMediaChange = () => {
+      if (!disposed) syncTheme();
+    };
+    try {
+      if (typeof win?.matchMedia === 'function') {
+        themeMediaQuery = win.matchMedia('(prefers-color-scheme: light)');
+        if (themeMediaQuery && typeof themeMediaQuery.addEventListener === 'function') {
+          themeMediaQuery.addEventListener('change', onThemeMediaChange);
+        }
+      }
+    } catch {
+      themeMediaQuery = null;
+    }
 
     const hasNavigationApi =
       Boolean(win?.navigation) && typeof win.navigation.addEventListener === 'function';
@@ -602,6 +647,7 @@
 
     doc.addEventListener?.('keydown', onDocKeyDown);
     doc.addEventListener?.('mousedown', onDocMouseDown);
+    doc.addEventListener?.('focusin', onDocFocusIn, true);
     doc.addEventListener?.('click', onPaneEvent, true);
     doc.addEventListener?.('focusin', onPaneEvent, true);
     win?.addEventListener?.('popstate', handleLocationOrFocusChange);
@@ -642,6 +688,18 @@
         clearTimeout(interactionSyncTimer);
         interactionSyncTimer = null;
       }
+      if (themeObserver) {
+        try {
+          themeObserver.disconnect();
+        } catch {}
+        themeObserver = null;
+      }
+      if (themeMediaQuery && typeof themeMediaQuery.removeEventListener === 'function') {
+        try {
+          themeMediaQuery.removeEventListener('change', onThemeMediaChange);
+        } catch {}
+        themeMediaQuery = null;
+      }
       if (hasNavigationApi) {
         win.navigation.removeEventListener?.('currententrychange', scheduleNavSync);
       } else {
@@ -650,6 +708,7 @@
       }
       doc.removeEventListener?.('keydown', onDocKeyDown);
       doc.removeEventListener?.('mousedown', onDocMouseDown);
+      doc.removeEventListener?.('focusin', onDocFocusIn, true);
       doc.removeEventListener?.('click', onPaneEvent, true);
       doc.removeEventListener?.('focusin', onPaneEvent, true);
       win?.removeEventListener?.('popstate', handleLocationOrFocusChange);
@@ -681,6 +740,7 @@
       },
       getState: () => ({
         disposed,
+        theme: currentTheme,
         activeConversationId,
         activePaneKey,
         paneCount: paneEntries.size,
@@ -713,9 +773,7 @@
     parseActiveConversationFromUrl,
     parseContextWindowHint,
     findComposerAnchors,
-    findFocusedComposerAnchor,
     resolvePaneConversationId,
-    resolveActiveConversationId,
     findTopbarAnchor,
     mountController,
     start

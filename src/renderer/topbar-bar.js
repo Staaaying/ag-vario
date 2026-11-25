@@ -15,12 +15,17 @@
   function createTopbarBar({
     doc = document,
     win = typeof window !== 'undefined' ? window : null,
+    theme = 'dark',
     onOpenPanel,
     onRefreshQuota,
     onRequestUsage
   } = {}) {
+    let currentTheme = styles.normalizeTheme(theme);
+    const initialPalette = styles.getThemeColors(currentTheme);
+
     const host = doc.createElement('div');
     host.id = 'ag-vario-topbar';
+    host.setAttribute('data-theme', currentTheme);
     host.style.flexShrink = '0';
     const shadow = host.attachShadow({ mode: 'open' });
     composerBar.attachShadowIsolation(shadow);
@@ -30,7 +35,7 @@
       <div class="agv-pills" data-placement="after-title">
         <button type="button" class="agv-pill" data-trigger="quota" aria-expanded="false" title="Quota">
           <span class="agv-ring-pair">
-            <span data-slot="ring-5h">${styles.buildSvgRing({ size: 20, strokeWidth: 2.2, fraction: 0 })}</span>
+            <span data-slot="ring-5h">${styles.buildSvgRing({ size: 20, strokeWidth: 2.2, fraction: 0, color: initialPalette.iceBlue, trackColor: initialPalette.track })}</span>
             <span class="agv-ring-stack">
               <span class="agv-ring-lbl">5h</span>
               <span class="agv-ring-pct agv-num" data-slot="pct-5h">—</span>
@@ -38,7 +43,7 @@
           </span>
           <span class="agv-pill-sep"></span>
           <span class="agv-ring-pair">
-            <span data-slot="ring-7d">${styles.buildSvgRing({ size: 20, strokeWidth: 2.2, fraction: 0 })}</span>
+            <span data-slot="ring-7d">${styles.buildSvgRing({ size: 20, strokeWidth: 2.2, fraction: 0, color: initialPalette.iceBlue, trackColor: initialPalette.track })}</span>
             <span class="agv-ring-stack">
               <span class="agv-ring-lbl">7d</span>
               <span class="agv-ring-pct agv-num" data-slot="pct-7d">—</span>
@@ -47,9 +52,9 @@
         </button>
         <button type="button" class="agv-pill" data-trigger="usage" aria-expanded="false" title="Usage">
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <rect x="2.5" y="9" width="2.5" height="4.5" rx="0.8" fill="${styles.COLORS.iceBlue}" fill-opacity="0.65"/>
-            <rect x="6.75" y="5.5" width="2.5" height="8" rx="0.8" fill="${styles.COLORS.iceBlue}" fill-opacity="0.85"/>
-            <rect x="11" y="2.5" width="2.5" height="11" rx="0.8" fill="${styles.COLORS.iceBlue}"/>
+            <rect x="2.5" y="9" width="2.5" height="4.5" rx="0.8" fill="var(--agv-ice)" fill-opacity="0.65"/>
+            <rect x="6.75" y="5.5" width="2.5" height="8" rx="0.8" fill="var(--agv-ice)" fill-opacity="0.85"/>
+            <rect x="11" y="2.5" width="2.5" height="11" rx="0.8" fill="var(--agv-ice)"/>
           </svg>
           <span class="agv-ring-stack">
             <span class="agv-ring-lbl">Today</span>
@@ -57,7 +62,7 @@
           </span>
         </button>
       </div>
-      <div class="agv-popover" data-open="false" hidden></div>
+      <div class="agv-popover" popover="manual" data-open="false" hidden></div>
     `;
 
     const pillsEl = shadow.querySelector('.agv-pills');
@@ -103,6 +108,7 @@
       popoverEl.style.left = `${Math.round(left)}px`;
       popoverEl.style.top = `${Math.round(top)}px`;
       popoverEl.style.bottom = 'auto';
+      composerBar.syncPopoverLayer(popoverEl, true);
     }
 
     function renderQuotaPanel() {
@@ -275,9 +281,10 @@
         </div>
       `;
 
+      const palette = styles.getThemeColors(currentTheme);
       const dotsHtml = (report.heatmap || [])
         .map((d) => {
-          const color = styles.COLORS.heatmapRamp[d.level] || styles.COLORS.heatmapRamp[0];
+          const color = palette.heatmapRamp[d.level] || palette.heatmapRamp[0];
           const isSel = selectedDateKey === d.dateKey;
           return `<button type="button" class="agv-heat-dot" data-date="${d.dateKey}" data-selected="${String(isSel)}" style="background:${color}" title="${d.dateKey}"></button>`;
         })
@@ -357,6 +364,7 @@
 
     function renderPopover() {
       if (!openPanel) {
+        composerBar.syncPopoverLayer(popoverEl, false);
         popoverEl.setAttribute('data-open', 'false');
         popoverEl.hidden = true;
         popoverEl.innerHTML = '';
@@ -370,6 +378,7 @@
       popoverEl.scrollTop = prevScroll;
       syncExpandedAttrs();
       reposition();
+      composerBar.syncPopoverLayer(popoverEl, true);
     }
 
     function openPanelNamed(name) {
@@ -473,8 +482,8 @@
       }
     });
 
-    function updateQuota(snap, { loading = false, error = null } = {}) {
-      quotaState = { data: snap || quotaState.data, loading, error };
+    function renderQuotaRings() {
+      const palette = styles.getThemeColors(currentTheme);
       const w5 = quotaState.data?.summaryRings?.window5h || null;
       const w7 = quotaState.data?.summaryRings?.window7d || null;
 
@@ -482,7 +491,8 @@
         size: 20,
         strokeWidth: 2.2,
         fraction: w5 ? w5.remainingFraction : 0,
-        color: styles.COLORS.iceBlue
+        color: palette.iceBlue,
+        trackColor: palette.track
       });
       slotPct5h.textContent = w5 && w5.percent !== null ? `${w5.percent}%` : '—';
 
@@ -490,10 +500,15 @@
         size: 20,
         strokeWidth: 2.2,
         fraction: w7 ? w7.remainingFraction : 0,
-        color: styles.COLORS.iceBlue
+        color: palette.iceBlue,
+        trackColor: palette.track
       });
       slotPct7d.textContent = w7 && w7.percent !== null ? `${w7.percent}%` : '—';
+    }
 
+    function updateQuota(snap, { loading = false, error = null } = {}) {
+      quotaState = { data: snap || quotaState.data, loading, error };
+      renderQuotaRings();
       if (openPanel === 'quota' || openPanel === 'usage') renderPopover();
     }
 
@@ -513,10 +528,21 @@
       if (openPanel === 'usage') renderPopover();
     }
 
+    function setTheme(nextTheme) {
+      const normalized = styles.normalizeTheme(nextTheme);
+      if (normalized === currentTheme) return;
+      currentTheme = normalized;
+      host.setAttribute('data-theme', currentTheme);
+      renderQuotaRings();
+      if (openPanel) renderPopover();
+    }
+
     return {
       host,
       shadow,
       setPlacement,
+      setTheme,
+      getTheme: () => currentTheme,
       updateQuota,
       updateToday,
       updateUsage,

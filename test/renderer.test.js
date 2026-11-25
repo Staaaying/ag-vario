@@ -33,6 +33,9 @@ class FakeElement {
     };
     this.hidden = false;
     this.scrollTop = 0;
+    this._popoverOpen = false;
+    this.popoverShowCalls = 0;
+    this.popoverHideCalls = 0;
     this._innerHTML = '';
     this._textContent = '';
     this._rect = { left: 100, top: 100, right: 200, bottom: 130, width: 420, height: 30 };
@@ -45,8 +48,8 @@ class FakeElement {
   get isConnected() {
     let cur = this;
     while (cur) {
-      if (cur === this.ownerDocument.body) return true;
-      cur = cur.parentElement;
+      if (cur === this.ownerDocument?.body) return true;
+      cur = cur.parentElement || cur.host || null;
     }
     return false;
   }
@@ -84,8 +87,20 @@ class FakeElement {
     if (idx >= 0) {
       this.children.splice(idx, 1);
       child.parentElement = null;
+      resetDetachedPopovers(child);
     }
     return child;
+  }
+  showPopover() {
+    if (!this.isConnected) throw new Error('InvalidStateError: disconnected popover');
+    if (this._popoverOpen) throw new Error('InvalidStateError: already open');
+    this._popoverOpen = true;
+    this.popoverShowCalls++;
+  }
+  hidePopover() {
+    if (!this._popoverOpen) throw new Error('InvalidStateError: not open');
+    this._popoverOpen = false;
+    this.popoverHideCalls++;
   }
   remove() {
     if (this.parentElement) this.parentElement.removeChild(this);
@@ -178,16 +193,26 @@ function matchSingleSelector(el, sel) {
   return matchAtom(el, sel.replace(/^:scope\s*>\s*/, ''));
 }
 
+function resetDetachedPopovers(node) {
+  if (!node) return;
+  if (node._popoverOpen) node._popoverOpen = false;
+  for (const ch of node.children || []) resetDetachedPopovers(ch);
+  if (node.shadowRoot) resetDetachedPopovers(node.shadowRoot);
+}
+
 function matchAtom(el, atom) {
   if (!atom) return false;
   let rest = atom;
   const tagMatch = rest.match(/^([a-zA-Z0-9_-]+)/);
-  if (tagMatch && !atom.startsWith('.') && !atom.startsWith('#') && !atom.startsWith('[')) {
+  if (tagMatch && !atom.startsWith('.') && !atom.startsWith('#') && !atom.startsWith('[') && !atom.startsWith(':')) {
     if (el.tagName !== tagMatch[1].toUpperCase()) return false;
     rest = rest.slice(tagMatch[1].length);
   }
   while (rest.length > 0) {
-    if (rest.startsWith('.')) {
+    if (rest.startsWith(':popover-open')) {
+      if (!el._popoverOpen) return false;
+      rest = rest.slice(':popover-open'.length);
+    } else if (rest.startsWith('.')) {
       const m = rest.match(/^\.([a-zA-Z0-9_-]+)/);
       if (!m || !el.classList.contains(m[1])) return false;
       rest = rest.slice(m[0].length);
@@ -350,6 +375,9 @@ test('styles: formatting helpers and CSS silence/no-infinite-animation contract'
 
   const css = styles.SHARED_CSS + styles.COMPOSER_CSS + styles.TOPBAR_CSS;
   assert.ok(css.includes('display: none !important'));
+  assert.ok(styles.SHARED_CSS.includes('inset: auto;'));
+  assert.ok(styles.SHARED_CSS.includes('margin: 0;'));
+  assert.ok(styles.SHARED_CSS.includes('padding: 0;'));
   assert.ok(styles.SHARED_CSS.includes('color-scheme: dark'));
   assert.ok(styles.SHARED_CSS.includes('::-webkit-scrollbar-thumb'));
   assert.equal(css.includes('@keyframes'), false);
@@ -1342,5 +1370,378 @@ test('mount: 3-pane and 4-pane splits (narrow fallback, 2x2 vertical popover fli
     assert.equal(c3.shadow.querySelector('[data-slot="session-tok"]').textContent, '300.1K');
   } finally {
     ctrl.dispose();
+  }
+});
+
+test('theme: detectHostTheme handles data-theme, classes, color-scheme, background luminance, and matchMedia', () => {
+  assert.ok(styles.SHARED_CSS.includes(':host([data-theme="light"])'));
+  assert.ok(styles.SHARED_CSS.includes('color-scheme: light'));
+
+  // 1. data-theme attribute takes precedence
+  const docAttr = {
+    documentElement: new FakeElement('HTML', null),
+    body: new FakeElement('BODY', null)
+  };
+  docAttr.documentElement.setAttribute('data-theme', 'light');
+  assert.equal(styles.detectHostTheme(docAttr, {}), 'light');
+  docAttr.documentElement.setAttribute('data-theme', 'dark');
+  assert.equal(styles.detectHostTheme(docAttr, {}), 'dark');
+
+  // 2. Class names (html.light / html.dark / vscode-light)
+  const docCls = {
+    documentElement: new FakeElement('HTML', null),
+    body: new FakeElement('BODY', null)
+  };
+  docCls.documentElement.className = 'antigravity light';
+  assert.equal(styles.detectHostTheme(docCls, {}), 'light');
+  docCls.documentElement.className = 'antigravity dark';
+  assert.equal(styles.detectHostTheme(docCls, {}), 'dark');
+  docCls.documentElement.className = '';
+  docCls.body.className = 'vscode-light';
+  assert.equal(styles.detectHostTheme(docCls, {}), 'light');
+
+  // 3. Computed color-scheme & background luminance (--background and backgroundColor)
+  const docLum = {
+    documentElement: new FakeElement('HTML', null),
+    body: new FakeElement('BODY', null)
+  };
+  const winLightScheme = {
+    getComputedStyle: () => ({ colorScheme: 'light', getPropertyValue: () => '' })
+  };
+  assert.equal(styles.detectHostTheme(docLum, winLightScheme), 'light');
+
+  const winLightBg = {
+    getComputedStyle: (el) => ({
+      colorScheme: 'light dark',
+      backgroundColor: el.tagName === 'BODY' ? 'rgb(248, 250, 252)' : 'rgba(0, 0, 0, 0)',
+      getPropertyValue: (prop) => (prop === '--background' && el.tagName === 'HTML' ? '#ffffff' : '')
+    })
+  };
+  assert.equal(styles.detectHostTheme(docLum, winLightBg), 'light');
+
+  const winDarkBg = {
+    getComputedStyle: () => ({
+      colorScheme: '',
+      backgroundColor: 'rgb(24, 26, 32)',
+      getPropertyValue: () => ''
+    })
+  };
+  assert.equal(styles.detectHostTheme(docLum, winDarkBg), 'dark');
+
+  // 4. matchMedia fallback & default dark
+  const docEmpty = {
+    documentElement: new FakeElement('HTML', null),
+    body: new FakeElement('BODY', null)
+  };
+  const winMediaLight = {
+    matchMedia: (q) => ({ matches: q.includes('light') })
+  };
+  assert.equal(styles.detectHostTheme(docEmpty, winMediaLight), 'light');
+  assert.equal(styles.detectHostTheme(docEmpty, {}), 'dark');
+});
+
+test('theme: mountController auto-detects light mode and live-syncs host theme switches', async () => {
+  const { win, doc } = createFakeDom();
+  doc.documentElement = new FakeElement('HTML', doc);
+  doc.documentElement.className = 'light';
+
+  let observerCb = null;
+  let observerDisconnected = false;
+  win.MutationObserver = class FakeMutationObserver {
+    constructor(cb) {
+      observerCb = cb;
+    }
+    observe() {}
+    disconnect() {
+      observerDisconnected = true;
+    }
+  };
+
+  const mediaListeners = [];
+  win.matchMedia = () => ({
+    matches: false,
+    addEventListener: (_ev, fn) => mediaListeners.push(fn),
+    removeEventListener: (_ev, fn) => {
+      const idx = mediaListeners.indexOf(fn);
+      if (idx >= 0) mediaListeners.splice(idx, 1);
+    }
+  });
+
+  const fakeApi = {
+    getQuota: async () => ({
+      ok: true,
+      data: {
+        updatedAtMs: Date.now(),
+        summaryRings: {
+          window5h: { remainingFraction: 0.75, percent: 75 },
+          window7d: { remainingFraction: 0.5, percent: 50 }
+        },
+        pools: []
+      }
+    }),
+    getToday: async () => ({ ok: true, data: { totalTokens: 1000 } }),
+    getSession: async () => ({
+      ok: true,
+      data: {
+        totalTokens: 5000,
+        totalCost: { costUsd: 0.05, priced: true, hasUnpriced: false },
+        main: {
+          turns: 1,
+          steps: 2,
+          inputTokens: 1000,
+          outputTokens: 500,
+          cacheReadTokens: 3500,
+          cacheHitRate: 0.777,
+          avgTtftMs: 400,
+          outputSpeedTps: 60,
+          modelTimeMs: 2000,
+          primaryModel: { displayName: 'Gemini 4 Neon' },
+          cost: { costUsd: 0.05, priced: true },
+          waterline: { usedTokens: 100000, contextLimit: 1000000, ratio: 0.1, percent: 10, level: 'green' }
+        },
+        subagentSummary: { totalCount: 0, runningCount: 0, hasRunning: false, badgeText: '0', items: [] }
+      }
+    }),
+    getUsage: async () => ({
+      ok: true,
+      data: {
+        summary: { tokens: 5000, estUsd: 0.05, dailyAvgTokens: 5000, avgPerChatTokens: 5000, activeDailyTimeMs: 60000 },
+        heatmap: [{ dateKey: '2026-11-25', totalTokens: 5000, level: 3, costUsd: 0.05 }],
+        byModel: [],
+        topSessions: []
+      }
+    })
+  };
+
+  const ctrl = mount.mountController({ win, doc, api: fakeApi });
+  try {
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(ctrl.getState().theme, 'light');
+    assert.equal(ctrl.topbar.host.getAttribute('data-theme'), 'light');
+    assert.equal(ctrl.composer.host.getAttribute('data-theme'), 'light');
+
+    // Light-mode ring colors and heatmap ramp are used
+    assert.ok(ctrl.topbar.shadow.querySelector('[data-slot="ring-5h"]').innerHTML.includes(styles.THEMES.light.iceBlue));
+    assert.ok(ctrl.composer.shadow.querySelector('[data-slot="ctx-ring"]').innerHTML.includes(styles.THEMES.light.contextLevels.green));
+
+    ctrl.topbar.openPanel('usage');
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(ctrl.topbar.shadow.querySelector('.agv-popover').innerHTML.includes(styles.THEMES.light.heatmapRamp[3]));
+
+    // Switch host theme from light -> dark via MutationObserver
+    doc.documentElement.className = 'dark';
+    assert.ok(typeof observerCb === 'function');
+    observerCb();
+
+    assert.equal(ctrl.getState().theme, 'dark');
+    assert.equal(ctrl.topbar.host.getAttribute('data-theme'), 'dark');
+    assert.equal(ctrl.composer.host.getAttribute('data-theme'), 'dark');
+    assert.ok(ctrl.topbar.shadow.querySelector('[data-slot="ring-5h"]').innerHTML.includes(styles.THEMES.dark.iceBlue));
+    assert.ok(ctrl.composer.shadow.querySelector('[data-slot="ctx-ring"]').innerHTML.includes(styles.THEMES.dark.contextLevels.green));
+    assert.ok(ctrl.topbar.shadow.querySelector('.agv-popover').innerHTML.includes(styles.THEMES.dark.heatmapRamp[3]));
+  } finally {
+    ctrl.dispose();
+  }
+  assert.equal(observerDisconnected, true);
+  assert.equal(mediaListeners.length, 0);
+});
+
+test('split-pane & Top Layer: pane-bounded left alignment, narrow pane fallback, popover="manual" lifecycle, and modal dialog auto-close', async () => {
+  const id1 = '11111111-1111-1111-1111-111111111111';
+  const id2 = '22222222-2222-2222-2222-222222222222';
+  const { win, doc, pane } = createFakeDom('https://127.0.0.1:43000/');
+  win.innerWidth = 1400;
+  win.innerHeight = 800;
+  pane.remove();
+
+  const pane1 = buildSplitPaneNode(doc, { paneId: 'pane-1', cascadeId: id1, modelLabel: 'Gemini 4 Neon (High)', unfocused: false });
+  const pane2 = buildSplitPaneNode(doc, { paneId: 'pane-2', cascadeId: id2, modelLabel: 'Gemini 4 Carbon (High)', unfocused: true });
+  pane1.outer._rect = { left: 0, top: 40, right: 700, bottom: 800, width: 700, height: 760 };
+  pane1.inner._rect = pane1.outer._rect;
+  pane1.footer._rect = { left: 20, top: 720, right: 680, bottom: 750, width: 660, height: 30 };
+  pane1.inputBox._rect = { left: 20, top: 650, right: 680, bottom: 760, width: 660, height: 110 };
+
+  pane2.outer._rect = { left: 700, top: 40, right: 1400, bottom: 800, width: 700, height: 760 };
+  pane2.inner._rect = pane2.outer._rect;
+  pane2.footer._rect = { left: 720, top: 720, right: 1380, bottom: 750, width: 660, height: 30 };
+  pane2.inputBox._rect = { left: 720, top: 650, right: 1380, bottom: 760, width: 660, height: 110 };
+
+  doc.body.appendChild(pane1.outer);
+  doc.body.appendChild(pane2.outer);
+
+  const api = {
+    getQuota: async () => ({ ok: true, data: { summaryRings: {}, pools: [] } }),
+    getToday: async () => ({ ok: true, data: { totalTokens: 0 } }),
+    getSession: async () => ({
+      ok: true,
+      data: {
+        main: {
+          turns: 1,
+          steps: 2,
+          inputTokens: 1000,
+          outputTokens: 200,
+          cacheReadTokens: 0,
+          totalTokens: 1200,
+          cacheHitRate: 0,
+          avgTtftMs: 500,
+          outputSpeedTps: 80,
+          modelTimeMs: 2500,
+          waterline: { usedTokens: 10000, contextLimit: 1000000, ratio: 0.01, percent: 1, level: 'green' },
+          primaryModel: { displayName: 'Gemini 4 Neon', displayNameWithEffort: 'Gemini 4 Neon (High)' },
+          cost: { priced: true, costUsd: 0.01 }
+        },
+        totalTokens: 1200,
+        totalCost: { priced: true, costUsd: 0.01, hasUnpriced: false },
+        subagentSummary: {
+          runningCount: 0,
+          totalCount: 1,
+          hasRunning: false,
+          badgeText: '0/1',
+          items: [
+            {
+              title: 'Independent Manuscript Reviewer',
+              status: 'Done',
+              modelDisplayName: 'Gemini 4 Carbon',
+              currentContextTokens: 49200,
+              waterline: { percent: 10 }
+            }
+          ]
+        }
+      }
+    })
+  };
+
+  const ctrl = mount.start({ win, doc, api });
+  try {
+    await new Promise((r) => setTimeout(r, 20));
+    const c1 = ctrl.composers.get('pane:pane-1');
+    const c2 = ctrl.composers.get('pane:pane-2');
+    const c1Pop = c1.shadow.querySelector('.agv-popover');
+    const c2Pop = c2.shadow.querySelector('.agv-popover');
+    const topPop = ctrl.topbar.shadow.querySelector('.agv-popover');
+
+    assert.equal(c1Pop.getAttribute('popover'), 'manual');
+    assert.equal(c2Pop.getAttribute('popover'), 'manual');
+    assert.equal(topPop.getAttribute('popover'), 'manual');
+
+    // 1a. Left pane trigger with room [320, 366] pure left-aligns inside left pane (320 + 288 = 608 <= 692)
+    const c1SubBtn = c1.shadow.querySelector('[data-trigger="subagents"]');
+    c1SubBtn._rect = { left: 320, top: 720, right: 366, bottom: 744, width: 46, height: 24 };
+    c1SubBtn.dispatchEvent({ type: 'click' });
+    assert.equal(c1.getOpenCard(), 'subagents');
+    assert.equal(c1Pop.style.left, '320px');
+    assert.equal(c1Pop._popoverOpen, true);
+    assert.equal(c1Pop.popoverShowCalls, 1);
+
+    // Periodic updateSession while open does not double-call showPopover() or throw
+    c1.updateSession({
+      main: {
+        turns: 2,
+        steps: 3,
+        inputTokens: 2000,
+        outputTokens: 300,
+        cacheReadTokens: 0,
+        totalTokens: 2300,
+        cacheHitRate: 0,
+        avgTtftMs: 500,
+        outputSpeedTps: 80,
+        modelTimeMs: 3000,
+        waterline: { usedTokens: 12000, contextLimit: 1000000, ratio: 0.012, percent: 1, level: 'green' },
+        primaryModel: { displayName: 'Gemini 4 Neon', displayNameWithEffort: 'Gemini 4 Neon (High)' },
+        cost: { priced: true, costUsd: 0.02 }
+      },
+      totalTokens: 2300,
+      totalCost: { priced: true, costUsd: 0.02, hasUnpriced: false },
+      subagentSummary: { runningCount: 0, totalCount: 1, hasRunning: false, badgeText: '0/1', items: [] }
+    });
+    assert.equal(c1Pop.popoverShowCalls, 1);
+    assert.equal(c1Pop._popoverOpen, true);
+
+    // 1b. Left pane Subagents trigger near right side [523, 566] would cross 700 -> clamps to 700 - 288 - 8 = 404px
+    c1SubBtn._rect = { left: 523, top: 720, right: 566, bottom: 744, width: 43, height: 24 };
+    c1.reposition();
+    assert.equal(c1Pop.style.left, '404px');
+
+    // 1c. Right pane trigger [740, 780] pure left-aligns at 740px; near right edge [1223, 1266] clamps to 1400 - 288 - 8 = 1104px
+    const c2SubBtn = c2.shadow.querySelector('[data-trigger="subagents"]');
+    c2SubBtn._rect = { left: 740, top: 720, right: 780, bottom: 744, width: 40, height: 24 };
+    c2SubBtn.dispatchEvent({ type: 'click' });
+    assert.equal(c1.getOpenCard(), null);
+    assert.equal(c1Pop._popoverOpen, false);
+    assert.equal(c1Pop.popoverHideCalls, 1);
+    assert.equal(c2.getOpenCard(), 'subagents');
+    assert.equal(c2Pop.style.left, '740px');
+    assert.equal(c2Pop._popoverOpen, true);
+
+    c2SubBtn._rect = { left: 1223, top: 720, right: 1266, bottom: 744, width: 43, height: 24 };
+    c2.reposition();
+    assert.equal(c2Pop.style.left, '1104px');
+
+    // 2. Ultra-narrow pane (<304px): centers over pane and clamps within viewport while staying in Top Layer
+    pane1.outer._rect = { left: 0, top: 40, right: 260, bottom: 800, width: 260, height: 760 };
+    pane1.inner._rect = pane1.outer._rect;
+    pane1.footer._rect = { left: 10, top: 720, right: 250, bottom: 750, width: 240, height: 30 };
+    pane1.inputBox._rect = { left: 10, top: 650, right: 250, bottom: 760, width: 240, height: 110 };
+    c1SubBtn._rect = { left: 180, top: 720, right: 220, bottom: 744, width: 40, height: 24 };
+    c1SubBtn.dispatchEvent({ type: 'click' });
+    assert.equal(c1Pop.style.left, '8px');
+    assert.equal(c1Pop._popoverOpen, true);
+
+    // Re-parenting into <340px fallback row while open re-promotes popover to Top Layer
+    const showCallsBeforeReparent = c1Pop.popoverShowCalls;
+    ctrl.refreshNow();
+    assert.equal(c1.host.parentElement, pane1.inputBox.parentElement);
+    assert.equal(c1Pop._popoverOpen, true);
+    assert.equal(c1Pop.popoverShowCalls, showCallsBeforeReparent + 1);
+
+    // Ultra-narrow pane in middle/right [700, 960] centers at (700+960-288)/2 = 686px
+    pane2.outer._rect = { left: 700, top: 40, right: 960, bottom: 800, width: 260, height: 760 };
+    pane2.inner._rect = pane2.outer._rect;
+    pane2.footer._rect = { left: 710, top: 720, right: 950, bottom: 750, width: 240, height: 30 };
+    pane2.inputBox._rect = { left: 710, top: 650, right: 950, bottom: 760, width: 240, height: 110 };
+    c2SubBtn._rect = { left: 880, top: 720, right: 920, bottom: 744, width: 40, height: 24 };
+    c2SubBtn.dispatchEvent({ type: 'click' });
+    assert.equal(c2Pop.style.left, '686px');
+    assert.equal(c2Pop._popoverOpen, true);
+
+    // 3. Topbar popover uses Top Layer lifecycle and closes on hide
+    const quotaBtn = ctrl.topbar.shadow.querySelector('[data-trigger="quota"]');
+    quotaBtn._rect = { left: 180, top: 8, right: 260, bottom: 34, width: 80, height: 26 };
+    quotaBtn.dispatchEvent({ type: 'click' });
+    assert.equal(ctrl.topbar.getOpenPanel(), 'quota');
+    assert.equal(c2.getOpenCard(), null);
+    assert.equal(c2Pop._popoverOpen, false);
+    assert.equal(topPop._popoverOpen, true);
+    assert.equal(topPop.popoverShowCalls, 1);
+
+    // 4. Focusin on regular chat input does NOT close open popover; focusin inside [role="dialog"] closes it
+    const regularInput = doc.createElement('textarea');
+    pane1.inputBox.appendChild(regularInput);
+    doc.dispatchEvent({ type: 'focusin', target: regularInput });
+    assert.equal(ctrl.topbar.getOpenPanel(), 'quota');
+    assert.equal(topPop._popoverOpen, true);
+
+    const modalDialog = doc.createElement('div');
+    modalDialog.setAttribute('role', 'dialog');
+    const modalInput = doc.createElement('input');
+    modalDialog.appendChild(modalInput);
+    doc.body.appendChild(modalDialog);
+    doc.dispatchEvent({ type: 'focusin', target: modalInput });
+    assert.equal(ctrl.topbar.getOpenPanel(), null);
+    assert.equal(topPop._popoverOpen, false);
+    assert.equal(topPop.popoverHideCalls, 1);
+  } finally {
+    ctrl.dispose();
+  }
+
+  // Standalone disconnected createComposerBar opens without throwing InvalidStateError
+  const { win: w2, doc: d2 } = createFakeDom();
+  const standalone = composerBar.createComposerBar({ doc: d2, win: w2 });
+  try {
+    standalone.openCard('subagents');
+    assert.equal(standalone.getOpenCard(), 'subagents');
+    assert.equal(standalone.shadow.querySelector('.agv-popover')._popoverOpen, false);
+  } finally {
+    standalone.dispose();
   }
 });

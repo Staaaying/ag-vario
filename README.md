@@ -37,7 +37,7 @@ Named after a glider's *Variometer* — an instrument that shows altitude change
 
 ## Highlights
 
-- **Native look & feel**: Dark frosted-glass styling that blends into Antigravity, with zero background rendering when panels are closed.
+- **Native look & feel**: Frosted-glass styling that adapts automatically to Antigravity's Dark and Light themes, with zero background rendering when panels are closed.
 - **Strictly read-only**: Only reads local session data and local endpoints; never modifies prompts, model settings, or network traffic.
 - **Zero third-party dependencies**: Built solely on Node.js built-ins — no `npm install` needed — with bundled install and lossless restore scripts.
 

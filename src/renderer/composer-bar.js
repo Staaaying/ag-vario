@@ -26,15 +26,69 @@
     shadow.addEventListener('click', (e) => e?.stopPropagation?.());
   }
 
+  function isPopoverOpen(el) {
+    try {
+      return Boolean(el && typeof el.matches === 'function' && el.matches(':popover-open'));
+    } catch {
+      return false;
+    }
+  }
+
+  function syncPopoverLayer(el, shouldOpen) {
+    if (!el) return;
+    if (shouldOpen) {
+      if (typeof el.showPopover === 'function' && el.isConnected && !isPopoverOpen(el)) {
+        try {
+          el.showPopover();
+        } catch {}
+      }
+      return;
+    }
+    if (typeof el.hidePopover === 'function' && isPopoverOpen(el)) {
+      try {
+        el.hidePopover();
+      } catch {}
+    }
+  }
+
+  function resolvePaneHorizontalBounds(host, anchorRect, vw) {
+    const candidates = [
+      host?.closest?.('[data-pane-id]'),
+      host?.closest?.('[data-testid="agent-input-box"]')
+    ];
+    for (const el of candidates) {
+      const r = el?.getBoundingClientRect?.();
+      if (
+        r &&
+        Number.isFinite(r.left) &&
+        Number.isFinite(r.right) &&
+        r.right - r.left > 0 &&
+        r.left <= anchorRect.left + 2 &&
+        r.right >= anchorRect.right - 2
+      ) {
+        return {
+          left: Math.max(0, r.left),
+          right: Math.min(vw, r.right)
+        };
+      }
+    }
+    return { left: 0, right: vw };
+  }
+
   function createComposerBar({
     doc = document,
     win = typeof window !== 'undefined' ? window : null,
     hostId = 'ag-vario-composer',
+    theme = 'dark',
     onOpenContext,
     onOpenCard
   } = {}) {
+    let currentTheme = styles.normalizeTheme(theme);
+    const initialPalette = styles.getThemeColors(currentTheme);
+
     const host = doc.createElement('div');
     host.setAttribute('data-ag-vario-composer', 'true');
+    host.setAttribute('data-theme', currentTheme);
     if (hostId) host.id = hostId;
     host.style.display = 'inline-flex';
     host.style.alignItems = 'center';
@@ -54,7 +108,7 @@
           <span class="agv-num" data-slot="session-tok">—</span>
         </button>
         <button type="button" class="agv-trigger" data-trigger="context" aria-expanded="false" title="Context window">
-          <span data-slot="ctx-ring">${styles.buildSvgRing({ size: 16, strokeWidth: 1.85, fraction: 0, color: styles.COLORS.contextLevels.unknown })}</span>
+          <span data-slot="ctx-ring">${styles.buildSvgRing({ size: 16, strokeWidth: 1.85, fraction: 0, color: initialPalette.contextLevels.unknown, trackColor: initialPalette.track })}</span>
           <span class="agv-num" data-slot="ctx-pct">—</span>
         </button>
         <button type="button" class="agv-trigger" data-trigger="subagents" aria-expanded="false" data-dim="true" title="Subagents">
@@ -65,7 +119,7 @@
           <span class="agv-num" data-slot="sub-badge">0</span>
         </button>
       </div>
-      <div class="agv-popover" data-open="false" hidden></div>
+      <div class="agv-popover" popover="manual" data-open="false" hidden></div>
     `;
 
     const rowEl = shadow.querySelector('.agv-comp-row');
@@ -97,7 +151,21 @@
       const vh = win?.innerHeight || 800;
       if (!rect || (rect.width === 0 && rect.height === 0)) return;
       const cardW = 288;
-      const left = Math.max(8, Math.min(vw - cardW - 8, rect.left));
+      const margin = 8;
+      const vpMinLeft = margin;
+      const vpMaxLeft = Math.max(margin, vw - cardW - margin);
+      const paneBounds = resolvePaneHorizontalBounds(host, rect, vw);
+      const paneMinLeft = Math.max(vpMinLeft, paneBounds.left + margin);
+      const paneMaxLeft = Math.min(vpMaxLeft, paneBounds.right - cardW - margin);
+
+      let left;
+      if (paneMaxLeft >= paneMinLeft) {
+        left = Math.max(paneMinLeft, Math.min(paneMaxLeft, rect.left));
+      } else {
+        const centeredLeft = (paneBounds.left + paneBounds.right - cardW) / 2;
+        left = Math.max(vpMinLeft, Math.min(vpMaxLeft, centeredLeft));
+      }
+
       const spaceAbove = rect.top - 16;
       const spaceBelow = vh - rect.bottom - 16;
       popoverEl.style.left = `${Math.round(left)}px`;
@@ -110,6 +178,7 @@
         popoverEl.style.top = 'auto';
         popoverEl.style.maxHeight = `${Math.max(140, Math.min(vh - 72, Math.floor(Math.max(spaceAbove, 140))))}px`;
       }
+      syncPopoverLayer(popoverEl, true);
     }
 
     function renderSessionCard() {
@@ -146,8 +215,9 @@
         }
       }
 
+      const palette = styles.getThemeColors(currentTheme);
       const speedStr = main.outputSpeedTps !== null ? `${main.outputSpeedTps.toFixed(0)} t/s` : '—';
-      const perfDot = '<span class="agv-dot" style="background:rgba(125,184,232,0.58);"></span>';
+      const perfDot = `<span class="agv-dot" style="background:${palette.perfDot};"></span>`;
 
       return `
         <div class="agv-card">
@@ -176,21 +246,21 @@
               <span class="agv-ice agv-num" style="font-weight:600;">Hit ${styles.formatPercent(main.cacheHitRate, 1)}</span>
             </div>
             <div class="agv-stack-bar">
-              <div style="width:${wCache.toFixed(2)}%;background:${styles.COLORS.iceBlue};"></div>
-              <div style="width:${wInput.toFixed(2)}%;background:rgba(214,234,250,0.88);"></div>
-              <div style="width:${wOutput.toFixed(2)}%;background:${styles.COLORS.contextLevels.orange};"></div>
+              <div style="width:${wCache.toFixed(2)}%;background:${palette.iceBlue};"></div>
+              <div style="width:${wInput.toFixed(2)}%;background:${palette.inputSegment};"></div>
+              <div style="width:${wOutput.toFixed(2)}%;background:${palette.contextLevels.orange};"></div>
             </div>
             <div class="agv-tri-row" style="margin-top:8px;">
               <div class="agv-tri-cell">
-                <div class="agv-tri-lbl"><span class="agv-dot" style="background:${styles.COLORS.iceBlue};"></span><span>Cache</span></div>
+                <div class="agv-tri-lbl"><span class="agv-dot" style="background:${palette.iceBlue};"></span><span>Cache</span></div>
                 <div class="agv-tri-val agv-num">${styles.formatTokensOneDecimal(cacheTok)}</div>
               </div>
               <div class="agv-tri-cell">
-                <div class="agv-tri-lbl"><span class="agv-dot" style="background:rgba(214,234,250,0.90);"></span><span>Input</span></div>
+                <div class="agv-tri-lbl"><span class="agv-dot" style="background:${palette.inputDot};"></span><span>Input</span></div>
                 <div class="agv-tri-val agv-num">${styles.formatTokensOneDecimal(inputTok)}</div>
               </div>
               <div class="agv-tri-cell">
-                <div class="agv-tri-lbl"><span class="agv-dot" style="background:${styles.COLORS.contextLevels.orange};"></span><span>Output</span></div>
+                <div class="agv-tri-lbl"><span class="agv-dot" style="background:${palette.contextLevels.orange};"></span><span>Output</span></div>
                 <div class="agv-tri-val agv-num">${styles.formatTokensOneDecimal(outputTok)}</div>
               </div>
             </div>
@@ -228,15 +298,17 @@
     }
 
     function renderContextTrigger(wl) {
+      const palette = styles.getThemeColors(currentTheme);
       const compParts = formatCompactionParts(sessionData?.main?.compaction);
-      const color = styles.COLORS.contextLevels[wl?.level || 'unknown'];
+      const color = palette.contextLevels[wl?.level || 'unknown'];
       slotCtxRing.innerHTML = styles.buildSvgRing({
         size: 16,
         strokeWidth: 1.85,
         fraction: wl?.ratio ?? 0,
         color,
+        trackColor: palette.track,
         centerText: compParts ? compParts.ringText : '',
-        centerColor: 'rgba(242, 244, 248, 0.92)'
+        centerColor: palette.centerText
       });
       const pctTxt = styles.formatContextPercentOneDecimal(wl);
       slotCtxPct.textContent =
@@ -249,6 +321,7 @@
     }
 
     function renderContextCard() {
+      const palette = styles.getThemeColors(currentTheme);
       const ctx = contextState.data;
       const fallbackMain = sessionData?.main;
       const wl = ctx?.waterline || fallbackMain?.waterline;
@@ -258,7 +331,7 @@
       const headerRight = limitStr ? (pctStr ? `${usedStr} / ${limitStr} · ${pctStr}` : `${usedStr} / ${limitStr}`) : usedStr;
       const compParts = formatCompactionParts(fallbackMain?.compaction);
       const compBannerHtml = compParts
-        ? `<div class="agv-compact-banner agv-num"><span class="agv-compact-left"><span class="agv-dot" style="background:${styles.COLORS.iceBlue};"></span><span>${styles.escapeHtml(compParts.left)}</span></span>${compParts.right ? `<span class="agv-compact-right">${styles.escapeHtml(compParts.right)}</span>` : ''}</div>`
+        ? `<div class="agv-compact-banner agv-num"><span class="agv-compact-left"><span class="agv-dot" style="background:${palette.iceBlue};"></span><span>${styles.escapeHtml(compParts.left)}</span></span>${compParts.right ? `<span class="agv-compact-right">${styles.escapeHtml(compParts.right)}</span>` : ''}</div>`
         : '';
 
       if (!ctx && !contextState.loading && !contextState.error && !fallbackMain) {
@@ -322,9 +395,10 @@
         `;
       }
 
+      const palette = styles.getThemeColors(currentTheme);
       const listHtml = items
         .map((item) => {
-          const dotColor = styles.COLORS.statusColors[item.status] || styles.COLORS.statusColors.Done;
+          const dotColor = palette.statusColors[item.status] || palette.statusColors.Done;
           const ctxTxt = item.waterline?.percent !== null && item.waterline?.percent !== undefined
             ? `${styles.formatTokensCompact(item.currentContextTokens)} · ${item.waterline.percent}%`
             : styles.formatTokensCompact(item.currentContextTokens);
@@ -359,6 +433,7 @@
 
     function renderPopover() {
       if (!openCard) {
+        syncPopoverLayer(popoverEl, false);
         popoverEl.setAttribute('data-open', 'false');
         popoverEl.hidden = true;
         popoverEl.innerHTML = '';
@@ -374,6 +449,7 @@
       popoverEl.scrollTop = prevScroll;
       syncExpandedAttrs();
       reposition();
+      syncPopoverLayer(popoverEl, true);
     }
 
     function openCardNamed(name) {
@@ -429,11 +505,22 @@
       if (openCard === 'context') renderPopover();
     }
 
+    function setTheme(nextTheme) {
+      const normalized = styles.normalizeTheme(nextTheme);
+      if (normalized === currentTheme) return;
+      currentTheme = normalized;
+      host.setAttribute('data-theme', currentTheme);
+      renderContextTrigger(contextState.data?.waterline || sessionData?.main?.waterline);
+      if (openCard) renderPopover();
+    }
+
     return {
       host,
       shadow,
       updateSession,
       updateContext,
+      setTheme,
+      getTheme: () => currentTheme,
       setCompact: (flag) => rowEl.setAttribute('data-compact', String(Boolean(flag))),
       setFallbackRow: (flag) => rowEl.setAttribute('data-fallback', String(Boolean(flag))),
       setFocused: (flag) => rowEl.setAttribute('data-focused', String(Boolean(flag))),
@@ -450,6 +537,7 @@
 
   return {
     createComposerBar,
-    attachShadowIsolation
+    attachShadowIsolation,
+    syncPopoverLayer
   };
 });
